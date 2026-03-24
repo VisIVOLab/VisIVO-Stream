@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+node_modules/
+dist/
+build/
+.env
+backend/renders/
+backend/runtime/
+/archive
+docs/repository_cleanup.md
