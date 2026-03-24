@@ -250,23 +250,22 @@ class RemotePipelineController:
     def _create_central_slice(self, source, shape: list[int]):
         dims_xyz = self._shape_to_xyz(shape)
         center = [0.5 * max(dim - 1, 0) for dim in dims_xyz]
-        primary_axis = max(range(3), key=lambda idx: dims_xyz[idx])
-        normals = {
-            0: [1.0, 0.0, 0.0],
-            1: [0.0, 1.0, 0.0],
-            2: [0.0, 0.0, 1.0],
-        }
+        # Keep the default FITS view explicit and stable: a central slice along Z.
+        # This makes the initial plane perpendicular to the Z axis, regardless of
+        # dataset anisotropy, and keeps future axis switching straightforward.
+        z_normal = [0.0, 0.0, 1.0]
 
         slice_filter = simple.Slice(Input=source)
         slice_filter.SliceType = "Plane"
         slice_filter.SliceOffsetValues = [0.0]
         slice_filter.SliceType.Origin = center
-        slice_filter.SliceType.Normal = normals[primary_axis]
+        slice_filter.SliceType.Normal = z_normal
         logger.info(
-            "Created central FITS slice: origin=%s normal=%s dims_xyz=%s",
+            "Created central FITS slice along Z: origin=%s normal=%s dims_xyz=%s axis=%s",
             center,
-            normals[primary_axis],
+            z_normal,
             dims_xyz,
+            "Z",
         )
         return slice_filter
 
