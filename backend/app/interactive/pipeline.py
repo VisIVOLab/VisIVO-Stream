@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 class RemotePipelineState:
     dataset_type: str
     source: object
+    full_source: object | None
+    preview_source: object | None
     display: object
     active_source: object
     view: object
@@ -33,6 +35,10 @@ class RemotePipelineState:
     iso_value: float = 0.0
     iso_min: float = 0.0
     iso_max: float = 1.0
+    preview_factor: int = 1
+    is_preview_mode: bool = False
+    full_dimensions: tuple[int, int, int] | None = None
+    preview_dimensions: tuple[int, int, int] | None = None
 
 
 class RemotePipelineController:
@@ -80,6 +86,8 @@ class RemotePipelineController:
         self.pipeline = RemotePipelineState(
             dataset_type="csv",
             source=points,
+            full_source=points,
+            preview_source=None,
             csv_surface=surface,
             display=display,
             active_source=points,
@@ -94,24 +102,63 @@ class RemotePipelineController:
         logger.info("CSV source created with default representation=Points")
         return self.pipeline.representation_options
 
-    def _load_fits(self, dataset_path: str, metadata: dict[str, Any]) -> list[str]:
+    def _fits_preview_factor(self, metadata: dict[str, Any]) -> int:
+        naxis = int(metadata.get("naxis") or 0)
+        if naxis < 3:
+            return 1
+        # Default to a deterministic stride-4 preview for FITS 3D cubes. This
+        # keeps the first remote frame lightweight while preserving structure.
+        return max(1, int(os.getenv("FITS_PREVIEW_FACTOR", "4")))
+
+    def _create_fits_programmable_source(self, dataset_path: str, downsample_factor: int) -> tuple[object, tuple[int, int, int]]:
         source = simple.ProgrammableSource()
         source.OutputDataSetType = "vtkImageData"
-        source.ScriptRequestInformation = self._build_fits_request_information_script(dataset_path)
-        source.Script = self._build_fits_script(dataset_path)
+        source.ScriptRequestInformation = self._build_fits_request_information_script(dataset_path, downsample_factor)
+        source.Script = self._build_fits_script(dataset_path, downsample_factor)
         source.UpdatePipeline()
-
         data_info = source.GetDataInformation()
         extent = data_info.GetExtent()
-        vtk_dimensions = (
+        dims = (
             int(extent[1] - extent[0] + 1),
             int(extent[3] - extent[2] + 1),
             int(extent[5] - extent[4] + 1),
         )
+        return source, dims
 
+    def _load_fits(self, dataset_path: str, metadata: dict[str, Any]) -> list[str]:
+        metadata = dict(metadata)
+        metadata.setdefault("path", dataset_path)
         naxis = int(metadata.get("naxis") or 0)
         shape = metadata.get("shape") or []
         scalar_name = str(metadata.get("scalar_name") or "FITSImage")
+        full_dimensions = self._shape_to_xyz(shape)
+        preview_factor = self._fits_preview_factor(metadata)
+
+        if naxis >= 3 and preview_factor > 1:
+            preview_source, preview_dimensions = self._create_fits_programmable_source(dataset_path, preview_factor)
+            full_source = None
+            source = preview_source
+            vtk_dimensions = preview_dimensions
+            is_preview_mode = True
+            logger.info(
+                "Preview source created: preview_factor=%s preview_dimensions=%s full_dimensions=%s representation=%s",
+                preview_factor,
+                preview_dimensions,
+                full_dimensions,
+                "Slice",
+            )
+        else:
+            source, vtk_dimensions = self._create_fits_programmable_source(dataset_path, 1)
+            preview_source = None
+            preview_dimensions = None
+            full_source = source
+            is_preview_mode = False
+            logger.info(
+                "Full-resolution source ready: full_dimensions=%s preview_dimensions=%s representation=%s",
+                full_dimensions,
+                preview_dimensions,
+                "Slice",
+            )
 
         slice_source = None
         contour_source = None
@@ -146,6 +193,8 @@ class RemotePipelineController:
         self.pipeline = RemotePipelineState(
             dataset_type="fits",
             source=source,
+            full_source=full_source,
+            preview_source=preview_source,
             fits_slice=slice_source,
             display=display,
             active_source=slice_source or source,
@@ -159,6 +208,10 @@ class RemotePipelineController:
             iso_value=iso_value,
             iso_min=iso_min,
             iso_max=iso_max,
+            preview_factor=preview_factor,
+            is_preview_mode=is_preview_mode,
+            full_dimensions=full_dimensions,
+            preview_dimensions=preview_dimensions,
         )
         self.current_representation = default_representation
         self.pipeline.current_colormap = "Viridis (matplotlib)"
@@ -172,7 +225,8 @@ class RemotePipelineController:
         )
         self.apply_colormap("Viridis (matplotlib)")
         logger.info(
-            "FITS source created: source=%s shown=%s vtk_dimensions=%s extent=%s bounds=%s scalar_range=%s default_representation=%s",
+            "FITS source created: mode=%s source=%s shown=%s vtk_dimensions=%s extent=%s bounds=%s scalar_range=%s default_representation=%s",
+            "preview" if is_preview_mode else "full",
             type(source).__name__,
             type(shown_object).__name__,
             vtk_dimensions,
@@ -269,11 +323,12 @@ class RemotePipelineController:
         )
         return slice_filter
 
-    def _build_fits_request_information_script(self, dataset_path: str) -> str:
+    def _build_fits_request_information_script(self, dataset_path: str, downsample_factor: int = 1) -> str:
         project_root = os.getenv("PROJECT_ROOT", os.getcwd())
         payload = {
             "dataset_path": str(Path(dataset_path)),
             "project_root": str(Path(project_root)),
+            "downsample_factor": max(1, int(downsample_factor)),
         }
         return f"""
 import sys
@@ -284,7 +339,7 @@ from app.core.pythonpath import bootstrap_external_site_packages
 bootstrap_external_site_packages()
 from app.datasets.fits_reader import read_fits_data
 
-result = read_fits_data(payload["dataset_path"], frame_index=0)
+result = read_fits_data(payload["dataset_path"], frame_index=0, downsample_factor=payload["downsample_factor"])
 shape = result.shape
 if len(shape) == 2:
     dims = (int(shape[1]), int(shape[0]), 1)
@@ -301,11 +356,12 @@ outInfo.Set(self.GetExecutive().WHOLE_EXTENT(), 0, dims[0]-1, 0, dims[1]-1, 0, d
             return (int(shape[2]), int(shape[1]), int(shape[0]))
         return (1, 1, 1)
 
-    def _build_fits_script(self, dataset_path: str) -> str:
+    def _build_fits_script(self, dataset_path: str, downsample_factor: int = 1) -> str:
         project_root = os.getenv("PROJECT_ROOT", os.getcwd())
         payload = {
             "dataset_path": str(Path(dataset_path)),
             "project_root": str(Path(project_root)),
+            "downsample_factor": max(1, int(downsample_factor)),
         }
         return f"""
 import sys
@@ -317,11 +373,86 @@ bootstrap_external_site_packages()
 from app.datasets.fits_reader import SCALAR_NAME, read_fits_data
 from app.datasets.fits_to_vtk import numpy_to_vtk_image_data
 
-fits_result = read_fits_data(payload["dataset_path"], frame_index=0)
+fits_result = read_fits_data(payload["dataset_path"], frame_index=0, downsample_factor=payload["downsample_factor"])
 vtk_image = numpy_to_vtk_image_data(fits_result.array, scalar_name=SCALAR_NAME)
 output = self.GetOutputDataObject(0)
 output.ShallowCopy(vtk_image)
 """
+
+    def _rebuild_fits_derived_sources(self, source) -> None:
+        assert self.pipeline is not None
+        metadata = self.pipeline.dataset_metadata or {}
+        shape = metadata.get("shape") or []
+
+        for derived in (self.pipeline.fits_contour, self.pipeline.fits_slice):
+            if derived is None:
+                continue
+            try:
+                simple.Hide(derived, self.view)
+            except Exception:
+                pass
+            try:
+                simple.Delete(derived)
+            except Exception:
+                pass
+
+        self.pipeline.fits_slice = None
+        self.pipeline.fits_contour = None
+
+        if int(metadata.get("naxis") or 0) < 3:
+            return
+
+        self.pipeline.fits_slice = self._create_central_slice(source, shape)
+        self.pipeline.fits_slice.UpdatePipeline()
+        contour_source, iso_value, iso_min, iso_max = self._create_fits_contour(source, metadata, self.pipeline.scalar_name)
+        self.pipeline.fits_contour = contour_source
+        self.pipeline.iso_min = iso_min
+        self.pipeline.iso_max = iso_max
+        self.pipeline.iso_value = max(iso_min, min(iso_max, self.pipeline.iso_value or iso_value))
+        self.pipeline.fits_contour.Isosurfaces = [self.pipeline.iso_value]
+        self.pipeline.fits_contour.UpdatePipeline()
+
+    def load_full_resolution(self) -> bool:
+        if self.pipeline is None or self.pipeline.dataset_type != "fits" or not self.pipeline.is_preview_mode:
+            return False
+
+        metadata = self.pipeline.dataset_metadata or {}
+        dataset_path = str(metadata.get("path") or "")
+        if not dataset_path:
+            logger.warning("Full-resolution load requested without dataset path in metadata")
+            return False
+
+        if self.pipeline.full_source is None:
+            self.pipeline.full_source, full_dimensions = self._create_fits_programmable_source(dataset_path, 1)
+            self.pipeline.full_dimensions = full_dimensions
+            logger.info(
+                "Full-resolution source ready: full_dimensions=%s preview_dimensions=%s representation=%s",
+                self.pipeline.full_dimensions,
+                self.pipeline.preview_dimensions,
+                self.current_representation,
+            )
+
+        self.pipeline.source = self.pipeline.full_source
+        self.pipeline.is_preview_mode = False
+        self.pipeline.vtk_dimensions = self.pipeline.full_dimensions
+        self._rebuild_fits_derived_sources(self.pipeline.source)
+
+        if self.current_representation == "Slice" and self.pipeline.fits_slice is not None:
+            self._swap_display_source(self.pipeline.fits_slice, "Surface", reset_camera=False)
+        elif self.current_representation == "Isocontour" and self.pipeline.fits_contour is not None:
+            self._swap_display_source(self.pipeline.fits_contour, "Surface", reset_camera=False)
+        else:
+            source_representation = "Volume" if self.current_representation == "Volume" else "Outline"
+            self._swap_display_source(self.pipeline.source, source_representation, reset_camera=False)
+
+        self.apply_colormap(self.pipeline.current_colormap)
+        logger.info(
+            "Switched from preview to full source: representation=%s preview_dimensions=%s full_dimensions=%s",
+            self.current_representation,
+            self.pipeline.preview_dimensions,
+            self.pipeline.full_dimensions,
+        )
+        return True
 
     def apply_colormap(self, preset: str) -> None:
         if self.pipeline is None:
@@ -337,12 +468,17 @@ output.ShallowCopy(vtk_image)
         lut.RescaleTransferFunction(*self.pipeline.scalar_range)
         pwf.RescaleTransferFunction(*self.pipeline.scalar_range)
         logger.info(
-            "Applied scalar coloring: requested_colormap=%s applied_colormap=%s field=%s range=%s object=%s",
+            "Applied scalar coloring: requested_colormap=%s applied_colormap=%s field=%s range=%s object=%s mode=%s",
             preset,
             self.pipeline.current_colormap,
             self.pipeline.scalar_name,
             self.pipeline.scalar_range,
-            "slice" if self.pipeline.active_source is self.pipeline.fits_slice else "source",
+            "contour"
+            if self.pipeline.active_source is self.pipeline.fits_contour
+            else "slice"
+            if self.pipeline.active_source is self.pipeline.fits_slice
+            else "source",
+            "preview" if self.pipeline.is_preview_mode else "full",
         )
         if self.pipeline.dataset_type == "fits" and self.current_representation == "Volume":
             self._apply_fits_volume_transfer_functions()
@@ -414,7 +550,7 @@ output.ShallowCopy(vtk_image)
             self.pipeline.scalar_range,
         )
 
-    def _swap_display_source(self, next_source, representation: str) -> None:
+    def _swap_display_source(self, next_source, representation: str, reset_camera: bool = True) -> None:
         assert self.pipeline is not None
         try:
             simple.Hide(self.pipeline.active_source, self.view)
@@ -429,20 +565,22 @@ output.ShallowCopy(vtk_image)
         self.pipeline.display = display
         details = self._inspect_dataset(next_source, self.pipeline.scalar_name)
         logger.info(
-            "Showing object=%s representation=%s bounds=%s arrays(point=%s, cell=%s) active=%s range=%s",
+            "Showing object=%s representation=%s mode=%s bounds=%s arrays(point=%s, cell=%s) active=%s range=%s",
             "contour"
             if next_source is self.pipeline.fits_contour
             else "slice"
             if next_source is self.pipeline.fits_slice
             else "source",
             representation,
+            "preview" if self.pipeline.is_preview_mode else "full",
             details["bounds"],
             details["point_arrays"],
             details["cell_arrays"],
             details["active_array"],
             details["active_range"],
         )
-        simple.ResetCamera(self.view)
+        if reset_camera:
+            simple.ResetCamera(self.view)
         simple.Render(self.view)
 
     def set_volume_preset(self, preset: str) -> None:
@@ -508,7 +646,14 @@ output.ShallowCopy(vtk_image)
         if self.pipeline is None:
             return
 
-        for source in (self.pipeline.fits_contour, self.pipeline.fits_slice, self.pipeline.csv_surface, self.pipeline.source):
+        for source in (
+            self.pipeline.fits_contour,
+            self.pipeline.fits_slice,
+            self.pipeline.csv_surface,
+            self.pipeline.preview_source,
+            self.pipeline.full_source,
+            self.pipeline.source,
+        ):
             if source is None:
                 continue
             try:

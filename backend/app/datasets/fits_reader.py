@@ -41,7 +41,18 @@ def _header_subset(header) -> dict[str, int | float | str | bool | None]:
     return values
 
 
-def read_fits_data(path: str | Path, frame_index: int = 0) -> FitsReadResult:
+def _downsample_array(array: np.ndarray, downsample_factor: int) -> np.ndarray:
+    factor = max(1, int(downsample_factor))
+    if factor == 1:
+        return array
+    if array.ndim == 2:
+        return array[::factor, ::factor]
+    if array.ndim == 3:
+        return array[::factor, ::factor, ::factor]
+    return array
+
+
+def read_fits_data(path: str | Path, frame_index: int = 0, downsample_factor: int = 1) -> FitsReadResult:
     file_path = Path(path)
     logger.info("Opening FITS file: %s", file_path)
 
@@ -77,15 +88,17 @@ def read_fits_data(path: str | Path, frame_index: int = 0) -> FitsReadResult:
         raise FitsReaderError(f"FITS dataset '{file_path.name}' contains no samples")
 
     raw_array = np.asarray(selected, dtype=np.float32)
+    raw_array = _downsample_array(raw_array, downsample_factor)
     sanitized = np.nan_to_num(raw_array, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
 
     logger.info(
-        "Loaded FITS dataset %s with naxis=%s original_shape=%s selected_shape=%s frame=%s",
+        "Loaded FITS dataset %s with naxis=%s original_shape=%s selected_shape=%s frame=%s downsample_factor=%s",
         file_path.name,
         naxis,
         tuple(int(v) for v in original.shape),
         tuple(int(v) for v in sanitized.shape),
         selected_frame,
+        max(1, int(downsample_factor)),
     )
 
     return FitsReadResult(

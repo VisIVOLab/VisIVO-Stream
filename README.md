@@ -199,7 +199,7 @@ python scripts/render_dataset.py --help
 Supported semantics:
 
 - FITS 2D: image/slice visualization
-- FITS 3D: slice by default, with volume and isocontour as interactive alternatives
+- FITS 3D: preview-first loading with an immediate central slice, then optional full-resolution refinement; volume and isocontour remain available
 - FITS 4D: first frame of the fourth axis is used for now
 
 The FITS pipeline extracts:
@@ -210,6 +210,8 @@ The FITS pipeline extracts:
 - selected FITS header fields
 - finite-only statistics
 - robust percentiles for viewer defaults
+
+For FITS 3D, the interactive pipeline now starts with a stride-based preview source by default and can then switch to full resolution from the viewer. The preview stride is controlled by `FITS_PREVIEW_FACTOR` and defaults to `4`.
 
 ## Main API Endpoints
 
