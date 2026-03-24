@@ -169,7 +169,7 @@ class RemotePipelineController:
         iso_max = 1.0
 
         if naxis >= 3:
-            slice_source = self._create_central_slice(source, shape)
+            slice_source = self._create_central_slice(source, vtk_dimensions)
             slice_source.UpdatePipeline()
             contour_source, iso_value, iso_min, iso_max = self._create_fits_contour(source, metadata, scalar_name)
             display = simple.Show(slice_source, self.view, "GeometryRepresentation")
@@ -189,6 +189,19 @@ class RemotePipelineController:
         shown_object = slice_source or source
         vtk_details = self._inspect_dataset(shown_object, scalar_name)
         scalar_range = vtk_details["active_range"]
+        if slice_source is not None:
+            logger.info(
+                "Slice input source=%s dims=%s",
+                self._fits_source_label(source),
+                vtk_dimensions,
+            )
+            logger.info(
+                "Slice VTK diagnostics: bounds=%s arrays=%s active=%s range=%s",
+                vtk_details["bounds"],
+                vtk_details["point_arrays"],
+                vtk_details["active_array"],
+                vtk_details["active_range"],
+            )
 
         self.pipeline = RemotePipelineState(
             dataset_type="fits",
@@ -301,8 +314,7 @@ class RemotePipelineController:
         opacity_scale = 1.4 if dynamic_span < 3.0 * max(rms, 1e-6) else 1.0
         return threshold, opacity_scale
 
-    def _create_central_slice(self, source, shape: list[int]):
-        dims_xyz = self._shape_to_xyz(shape)
+    def _create_central_slice(self, source, dims_xyz: tuple[int, int, int]):
         center = [0.5 * max(dim - 1, 0) for dim in dims_xyz]
         # Keep the default FITS view explicit and stable: a central slice along Z.
         # This makes the initial plane perpendicular to the Z axis, regardless of
@@ -315,7 +327,8 @@ class RemotePipelineController:
         slice_filter.SliceType.Origin = center
         slice_filter.SliceType.Normal = z_normal
         logger.info(
-            "Created central FITS slice along Z: origin=%s normal=%s dims_xyz=%s axis=%s",
+            "Created central FITS slice along Z: input_source=%s origin=%s normal=%s dims_xyz=%s axis=%s",
+            self._fits_source_label(source),
             center,
             z_normal,
             dims_xyz,
@@ -382,7 +395,7 @@ output.ShallowCopy(vtk_image)
     def _rebuild_fits_derived_sources(self, source) -> None:
         assert self.pipeline is not None
         metadata = self.pipeline.dataset_metadata or {}
-        shape = metadata.get("shape") or []
+        dims_xyz = self.pipeline.preview_dimensions if self.pipeline.is_preview_mode else self.pipeline.full_dimensions
 
         for derived in (self.pipeline.fits_contour, self.pipeline.fits_slice):
             if derived is None:
@@ -402,7 +415,9 @@ output.ShallowCopy(vtk_image)
         if int(metadata.get("naxis") or 0) < 3:
             return
 
-        self.pipeline.fits_slice = self._create_central_slice(source, shape)
+        if dims_xyz is None:
+            dims_xyz = self._source_dimensions(source)
+        self.pipeline.fits_slice = self._create_central_slice(source, dims_xyz)
         self.pipeline.fits_slice.UpdatePipeline()
         contour_source, iso_value, iso_min, iso_max = self._create_fits_contour(source, metadata, self.pipeline.scalar_name)
         self.pipeline.fits_contour = contour_source
@@ -411,6 +426,15 @@ output.ShallowCopy(vtk_image)
         self.pipeline.iso_value = max(iso_min, min(iso_max, self.pipeline.iso_value or iso_value))
         self.pipeline.fits_contour.Isosurfaces = [self.pipeline.iso_value]
         self.pipeline.fits_contour.UpdatePipeline()
+        slice_details = self._inspect_dataset(self.pipeline.fits_slice, self.pipeline.scalar_name)
+        logger.info(
+            "Slice VTK diagnostics: input_source=%s bounds=%s arrays=%s active=%s range=%s",
+            self._fits_source_label(source),
+            slice_details["bounds"],
+            slice_details["point_arrays"],
+            slice_details["active_array"],
+            slice_details["active_range"],
+        )
 
     def load_full_resolution(self) -> bool:
         if self.pipeline is None or self.pipeline.dataset_type != "fits" or not self.pipeline.is_preview_mode:
@@ -552,10 +576,7 @@ output.ShallowCopy(vtk_image)
 
     def _swap_display_source(self, next_source, representation: str, reset_camera: bool = True) -> None:
         assert self.pipeline is not None
-        try:
-            simple.Hide(self.pipeline.active_source, self.view)
-        except Exception:
-            pass
+        self._hide_all_fits_objects()
 
         display = simple.Show(next_source, self.view)
         display.Representation = representation
@@ -565,7 +586,7 @@ output.ShallowCopy(vtk_image)
         self.pipeline.display = display
         details = self._inspect_dataset(next_source, self.pipeline.scalar_name)
         logger.info(
-            "Showing object=%s representation=%s mode=%s bounds=%s arrays(point=%s, cell=%s) active=%s range=%s",
+            "Showing object=%s representation=%s mode=%s active_source=%s bounds=%s arrays(point=%s, cell=%s) active=%s range=%s",
             "contour"
             if next_source is self.pipeline.fits_contour
             else "slice"
@@ -573,6 +594,7 @@ output.ShallowCopy(vtk_image)
             else "source",
             representation,
             "preview" if self.pipeline.is_preview_mode else "full",
+            self._fits_source_label(next_source),
             details["bounds"],
             details["point_arrays"],
             details["cell_arrays"],
@@ -726,6 +748,48 @@ output.ShallowCopy(vtk_image)
             "active_array": active_name,
             "active_range": active_range if active is not None else (0.0, 1.0),
         }
+
+    def _source_dimensions(self, source) -> tuple[int, int, int]:
+        source.UpdatePipeline()
+        data_info = source.GetDataInformation()
+        extent = data_info.GetExtent()
+        return (
+            int(extent[1] - extent[0] + 1),
+            int(extent[3] - extent[2] + 1),
+            int(extent[5] - extent[4] + 1),
+        )
+
+    def _fits_source_label(self, source) -> str:
+        if self.pipeline is None:
+            return type(source).__name__
+        if source is self.pipeline.preview_source:
+            return "preview_source"
+        if source is self.pipeline.full_source:
+            return "full_source"
+        if source is self.pipeline.fits_slice:
+            return "slice"
+        if source is self.pipeline.fits_contour:
+            return "contour"
+        if source is self.pipeline.source:
+            return "source"
+        return type(source).__name__
+
+    def _hide_all_fits_objects(self) -> None:
+        assert self.pipeline is not None
+        if self.pipeline.dataset_type != "fits":
+            try:
+                simple.Hide(self.pipeline.active_source, self.view)
+            except Exception:
+                pass
+            return
+
+        for obj in (self.pipeline.fits_slice, self.pipeline.fits_contour, self.pipeline.preview_source, self.pipeline.full_source, self.pipeline.source):
+            if obj is None:
+                continue
+            try:
+                simple.Hide(obj, self.view)
+            except Exception:
+                pass
 
     def _warn_if_missing_visible_array(self, details: dict[str, Any], scalar_name: str) -> None:
         if scalar_name not in details["point_arrays"]:
