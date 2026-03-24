@@ -5,10 +5,12 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routes import router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.core.pythonpath import warn_if_numpy_paraview_incompatible
 
 
 settings = get_settings()
 configure_logging(settings.log_level)
+warn_if_numpy_paraview_incompatible()
 settings.renders_dir.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(

@@ -136,6 +136,7 @@ This is a secondary workflow kept for utility.
 - Python dependencies installed in the backend virtualenv
 - `trame` available to the Python runtime used by the interactive viewer
 - `astropy` available for FITS handling
+- NumPy 1.x for ParaView 6.0.1 compatibility
 
 Quick checks:
 
@@ -144,6 +145,12 @@ pvpython --version
 pvserver --version
 python3 --version
 ```
+
+Compatibility note:
+
+- ParaView 6.0.1 is not compatible with NumPy 2.x in the FITS programmable pipeline because VTK Python code still relies on APIs such as `numpy.in1d`.
+- Keep backend and ParaView-exposed site-packages on `numpy<2`.
+- The project requirements now pin NumPy accordingly, and runtime bootstrap emits a warning if it detects NumPy 2.x with ParaView 6.0.1.
 
 ## Local Setup
 
@@ -160,6 +167,8 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 If your ParaView Python runtime does not ship with `pip`, keep `trame` and `astropy` in the backend `.venv` and let the bootstrap logic expose those packages to `pvpython`.
+
+When using ParaView 6.0.1, make sure the exposed environment also resolves to `numpy<2`. A mixed setup with `pvpython` plus external `site-packages` from a NumPy 2.x environment will break FITS programmable sources.
 
 ### 2. Interactive Viewer
 
@@ -190,7 +199,7 @@ python scripts/render_dataset.py --help
 Supported semantics:
 
 - FITS 2D: image/slice visualization
-- FITS 3D: slice by default, with volume and isocontour as interactive alternatives
+- FITS 3D: preview-first loading with an immediate central slice, then optional full-resolution refinement; volume and isocontour remain available
 - FITS 4D: first frame of the fourth axis is used for now
 
 The FITS pipeline extracts:
@@ -201,6 +210,8 @@ The FITS pipeline extracts:
 - selected FITS header fields
 - finite-only statistics
 - robust percentiles for viewer defaults
+
+For FITS 3D, the interactive pipeline now starts with a stride-based preview source by default and can then switch to full resolution from the viewer. The preview stride is controlled by `FITS_PREVIEW_FACTOR` and defaults to `4`.
 
 ## Main API Endpoints
 
