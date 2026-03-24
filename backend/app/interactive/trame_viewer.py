@@ -118,6 +118,9 @@ class PvServerTrameViewer:
         self.state.volume_preset_options = ["soft", "medium", "strong"]
         self.state.volume_threshold = 0.0
         self.state.opacity_scale = 1.0
+        self.state.iso_value = 0.0
+        self.state.iso_min = 0.0
+        self.state.iso_max = 1.0
         self.state.status_message = "Connecting to pvserver"
 
     def _connect_to_pvserver(self) -> None:
@@ -149,6 +152,7 @@ class PvServerTrameViewer:
         self.state.change("volume_preset")(self._handle_volume_preset_change)
         self.state.change("volume_threshold")(self._handle_volume_threshold_change)
         self.state.change("opacity_scale")(self._handle_opacity_scale_change)
+        self.state.change("iso_value")(self._handle_iso_value_change)
 
     def _build_ui(self) -> None:
         assert self.view is not None
@@ -220,6 +224,17 @@ class PvServerTrameViewer:
                         classes="mb-4",
                         v_if="representation === 'Volume'",
                     )
+                    vuetify.VSlider(
+                        label="Iso Value",
+                        v_model=("iso_value", 0.0),
+                        min=("iso_min", 0.0),
+                        max=("iso_max", 1.0),
+                        step=0.01,
+                        hide_details=True,
+                        dense=True,
+                        classes="mb-4",
+                        v_if="representation === 'Isocontour'",
+                    )
                     vuetify.VBtn("Reset Contrast", click=self.reset_contrast, outlined=True, classes="mb-4")
                     vuetify.VAlert("{{ status_message }}", type="info", dense=True, outlined=True)
 
@@ -258,6 +273,9 @@ class PvServerTrameViewer:
             if self.pipeline.pipeline is not None:
                 self.state.volume_threshold = self.pipeline.pipeline.volume_threshold
                 self.state.opacity_scale = self.pipeline.pipeline.opacity_scale
+                self.state.iso_value = self.pipeline.pipeline.iso_value
+                self.state.iso_min = self.pipeline.pipeline.iso_min
+                self.state.iso_max = self.pipeline.pipeline.iso_max
                 self.pipeline.set_volume_threshold(self.pipeline.pipeline.volume_threshold)
                 self.pipeline.set_opacity_scale(self.pipeline.pipeline.opacity_scale)
             self.state.status_message = f"Loaded {self.state.dataset_name} as {self.state.dataset_type}"
@@ -334,6 +352,14 @@ class PvServerTrameViewer:
         logger.info("Changing opacity scale to %s", opacity_scale)
         self.pipeline.set_opacity_scale(float(opacity_scale))
         self.state.status_message = f"Opacity scale set to {opacity_scale:.2f}"
+        self._safe_view_update()
+
+    def _handle_iso_value_change(self, iso_value, **_kwargs) -> None:
+        if self.pipeline is None:
+            return
+        logger.info("Changing iso value to %s", iso_value)
+        self.pipeline.set_isocontour_value(float(iso_value))
+        self.state.status_message = f"Iso value set to {float(iso_value):.2f}"
         self._safe_view_update()
 
     def current_representation_label(self) -> str:

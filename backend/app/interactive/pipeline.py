@@ -24,11 +24,15 @@ class RemotePipelineState:
     dataset_metadata: dict[str, Any] | None = None
     csv_surface: object | None = None
     fits_slice: object | None = None
+    fits_contour: object | None = None
     vtk_dimensions: tuple[int, int, int] | None = None
     volume_preset: str = "medium"
     current_colormap: str = "Viridis (matplotlib)"
     volume_threshold: float = 0.0
     opacity_scale: float = 1.0
+    iso_value: float = 0.0
+    iso_min: float = 0.0
+    iso_max: float = 1.0
 
 
 class RemotePipelineController:
@@ -110,16 +114,25 @@ class RemotePipelineController:
         scalar_name = str(metadata.get("scalar_name") or "FITSImage")
 
         slice_source = None
+        contour_source = None
         default_representation = "Slice"
-        representation_options = ["Slice", "Outline"] if naxis == 2 else ["Slice", "Volume", "Outline"]
+        representation_options = ["Slice", "Outline"] if naxis == 2 else ["Slice", "Volume", "Isocontour", "Outline"]
+        iso_value = 0.0
+        iso_min = 0.0
+        iso_max = 1.0
 
         if naxis >= 3:
             slice_source = self._create_central_slice(source, shape)
             slice_source.UpdatePipeline()
+            contour_source, iso_value, iso_min, iso_max = self._create_fits_contour(source, metadata, scalar_name)
             display = simple.Show(slice_source, self.view, "GeometryRepresentation")
             display.Representation = "Surface"
             try:
                 simple.Hide(source, self.view)
+            except Exception:
+                pass
+            try:
+                simple.Hide(contour_source, self.view)
             except Exception:
                 pass
         else:
@@ -142,6 +155,10 @@ class RemotePipelineController:
             representation_options=representation_options,
             dataset_metadata=metadata,
             vtk_dimensions=vtk_dimensions,
+            fits_contour=contour_source,
+            iso_value=iso_value,
+            iso_min=iso_min,
+            iso_max=iso_max,
         )
         self.current_representation = default_representation
         self.pipeline.current_colormap = "Viridis (matplotlib)"
@@ -166,6 +183,53 @@ class RemotePipelineController:
         )
         self._warn_if_missing_visible_array(vtk_details, scalar_name)
         return representation_options
+
+    def _create_fits_contour(
+        self,
+        source,
+        metadata: dict[str, Any],
+        scalar_name: str,
+    ) -> tuple[object, float, float, float]:
+        stats = metadata.get("stats") or {}
+        data_min = float(stats.get("min", 0.0))
+        data_max = float(stats.get("max", 1.0))
+        mean = float(stats.get("mean", data_min))
+        rms = abs(float(stats.get("rms", max(data_max - data_min, 1.0) * 0.1)))
+        p50 = float(stats.get("p50", mean))
+        p90 = float(stats.get("p90", mean + 3.0 * rms))
+        p99 = float(stats.get("p99", data_max))
+
+        iso_min = max(data_min, p50)
+        iso_max = min(data_max, p99)
+        if iso_max <= iso_min:
+            iso_min = data_min
+            iso_max = data_max if data_max > data_min else data_min + 1.0
+
+        # Astronomical FITS cubes are often noise-dominated. Use a conservative
+        # default that favors real structures over background: max(p90, mean + 3*rms).
+        iso_value = max(p90, mean + 3.0 * rms)
+        iso_value = min(max(iso_value, iso_min), iso_max)
+
+        contour = simple.Contour(Input=source)
+        contour.ContourBy = ["POINTS", scalar_name]
+        contour.Isosurfaces = [float(iso_value)]
+        contour.PointMergeMethod = "Uniform Binning"
+        contour.ComputeScalars = 1
+        contour.UpdatePipeline()
+
+        logger.info(
+            "Contour created: iso_value=%s iso_range=(%s, %s) scalar_range=(%s, %s) stats=(mean=%s rms=%s p90=%s p99=%s)",
+            iso_value,
+            iso_min,
+            iso_max,
+            data_min,
+            data_max,
+            mean,
+            rms,
+            p90,
+            p99,
+        )
+        return contour, float(iso_value), float(iso_min), float(iso_max)
 
     def _initial_volume_defaults(self, metadata: dict[str, Any]) -> tuple[float, float]:
         stats = metadata.get("stats") or {}
@@ -299,17 +363,19 @@ output.ShallowCopy(vtk_image)
 
     def _set_fits_representation(self, representation: str) -> None:
         assert self.pipeline is not None
-        normalized = representation if representation in {"Slice", "Volume", "Outline"} else "Slice"
+        normalized = representation if representation in {"Slice", "Volume", "Isocontour", "Outline"} else "Slice"
         logger.info("Applying FITS representation=%s", normalized)
 
         if normalized == "Slice" and self.pipeline.fits_slice is not None:
             self._swap_display_source(self.pipeline.fits_slice, "Surface")
+        elif normalized == "Isocontour":
+            self._set_fits_isocontour()
         else:
             source_representation = "Volume" if normalized == "Volume" else "Outline"
             self._swap_display_source(self.pipeline.source, source_representation)
 
         self.current_representation = normalized
-        self.apply_colormap("Viridis (matplotlib)")
+        self.apply_colormap(self.pipeline.current_colormap)
         logger.info(
             "FITS representation set: representation=%s vtk_dimensions=%s",
             normalized,
@@ -334,8 +400,20 @@ output.ShallowCopy(vtk_image)
             self.pipeline.display.PointSize = 5.0
             self.pipeline.display.Opacity = 0.95
         self.current_representation = normalized
-        self.apply_colormap("Viridis (matplotlib)")
+        self.apply_colormap(self.pipeline.current_colormap)
         logger.info("CSV representation set: %s", normalized)
+
+    def _set_fits_isocontour(self) -> None:
+        assert self.pipeline is not None
+        if self.pipeline.fits_contour is None:
+            logger.warning("Isocontour requested but contour source is not available")
+            return
+        self._swap_display_source(self.pipeline.fits_contour, "Surface")
+        logger.info(
+            "Applying representation=Isocontour iso_value=%s scalar_range=%s",
+            self.pipeline.iso_value,
+            self.pipeline.scalar_range,
+        )
 
     def _swap_display_source(self, next_source, representation: str) -> None:
         assert self.pipeline is not None
@@ -353,7 +431,11 @@ output.ShallowCopy(vtk_image)
         details = self._inspect_dataset(next_source, self.pipeline.scalar_name)
         logger.info(
             "Showing object=%s representation=%s bounds=%s arrays(point=%s, cell=%s) active=%s range=%s",
-            "slice" if next_source is self.pipeline.fits_slice else "source",
+            "contour"
+            if next_source is self.pipeline.fits_contour
+            else "slice"
+            if next_source is self.pipeline.fits_slice
+            else "source",
             representation,
             details["bounds"],
             details["point_arrays"],
@@ -392,6 +474,25 @@ output.ShallowCopy(vtk_image)
             self._apply_fits_volume_transfer_functions()
             simple.Render(self.view)
 
+    def set_isocontour_value(self, iso_value: float) -> None:
+        if self.pipeline is None or self.pipeline.dataset_type != "fits" or self.pipeline.fits_contour is None:
+            return
+
+        clamped = max(self.pipeline.iso_min, min(self.pipeline.iso_max, float(iso_value)))
+        self.pipeline.iso_value = clamped
+        self.pipeline.fits_contour.Isosurfaces = [clamped]
+        self.pipeline.fits_contour.UpdatePipeline()
+        logger.info(
+            "Contour updated: iso_value=%s iso_range=(%s, %s)",
+            self.pipeline.iso_value,
+            self.pipeline.iso_min,
+            self.pipeline.iso_max,
+        )
+        if self.current_representation == "Isocontour":
+            self._swap_display_source(self.pipeline.fits_contour, "Surface")
+            self.apply_colormap(self.pipeline.current_colormap)
+            simple.Render(self.view)
+
     def reset_contrast(self) -> None:
         if self.pipeline is None:
             return
@@ -408,7 +509,7 @@ output.ShallowCopy(vtk_image)
         if self.pipeline is None:
             return
 
-        for source in (self.pipeline.fits_slice, self.pipeline.csv_surface, self.pipeline.source):
+        for source in (self.pipeline.fits_contour, self.pipeline.fits_slice, self.pipeline.csv_surface, self.pipeline.source):
             if source is None:
                 continue
             try:
