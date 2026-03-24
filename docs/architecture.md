@@ -54,6 +54,12 @@ Responsibilities:
 - metadata extraction and validation
 - conversion from NumPy arrays to `vtkImageData`
 
+Compatibility constraint:
+
+- ParaView 6.0.1 currently requires NumPy 1.x for the FITS programmable pipeline path.
+- NumPy 2.x removes APIs still used by `vtkmodules.numpy_interface`, including `numpy.in1d`.
+- Any backend or external site-packages exposed to `pvpython` or `pvserver` must therefore stay on `numpy<2` until the ParaView/VTK stack is upgraded.
+
 Key files:
 
 - `backend/app/services/datasets.py`

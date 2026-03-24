@@ -2,5 +2,5 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.0
 pydantic==2.11.2
 pydantic-settings==2.8.1
-numpy==2.2.4
+numpy>=1.26,<2
 astropy==7.0.1
