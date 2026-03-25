@@ -7,6 +7,8 @@ from typing import Any
 
 from paraview import servermanager, simple
 
+from app.core.config import get_settings
+
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +39,20 @@ class RemotePipelineState:
     slice_index: int = 0
     slice_index_min: int = 0
     slice_index_max: int = 0
+    volume_preview_source: object | None = None
+    volume_preview_stride: int = 1
+    volume_preview_enabled: bool = False
+    volume_preview_loaded: bool = False
+    full_volume_requested: bool = False
+    source_file_size_mb: float = 0.0
+    volume_preview_dimensions: tuple[int, int, int] | None = None
+    volume_preview_estimated_mb: float = 0.0
 
 
 class RemotePipelineController:
     def __init__(self, view):
         self.view = view
+        self.settings = get_settings()
         self.pipeline: RemotePipelineState | None = None
         self.current_representation = ""
 
@@ -124,6 +135,11 @@ class RemotePipelineController:
         naxis = int(metadata.get("naxis") or 0)
         scalar_name = str(metadata.get("scalar_name") or "FITSImage")
         downsample_factor = self._fits_downsample_factor(metadata)
+        dataset_file_size_mb = 0.0
+        try:
+            dataset_file_size_mb = Path(dataset_path).stat().st_size / (1024 * 1024)
+        except OSError:
+            pass
 
         source, vtk_dimensions = self._create_fits_programmable_source(dataset_path, downsample_factor)
         if downsample_factor > 1:
@@ -190,7 +206,23 @@ class RemotePipelineController:
             slice_index=slice_index,
             slice_index_min=slice_index_min,
             slice_index_max=slice_index_max,
+            source_file_size_mb=dataset_file_size_mb,
         )
+        self.pipeline.volume_preview_stride, self.pipeline.volume_preview_dimensions, self.pipeline.volume_preview_estimated_mb = self._volume_preview_plan(
+            metadata,
+            vtk_dimensions,
+            dataset_file_size_mb,
+        )
+        self.pipeline.volume_preview_enabled = self.pipeline.volume_preview_stride > 1
+        if self.pipeline.volume_preview_enabled:
+            logger.info(
+                "Large FITS detected, memory-safe volume preview enabled: shape=%s file_size_mb=%.2f stride=%s preview_dimensions=%s estimated_preview_mb=%.2f",
+                metadata.get("shape"),
+                dataset_file_size_mb,
+                self.pipeline.volume_preview_stride,
+                self.pipeline.volume_preview_dimensions,
+                self.pipeline.volume_preview_estimated_mb,
+            )
         self.current_representation = default_representation
         self.pipeline.volume_threshold, self.pipeline.opacity_scale = self._initial_volume_defaults(metadata)
         logger.info(
@@ -258,6 +290,32 @@ class RemotePipelineController:
             p99,
         )
         return contour, float(iso_value), float(iso_min), float(iso_max)
+
+    def _volume_preview_plan(
+        self,
+        metadata: dict[str, Any],
+        dims_xyz: tuple[int, int, int],
+        dataset_file_size_mb: float,
+    ) -> tuple[int, tuple[int, int, int] | None, float]:
+        if not self.settings.fits_volume_preview_auto_enable:
+            return 1, None, 0.0
+        if int(metadata.get("naxis") or 0) < 3:
+            return 1, None, 0.0
+        if dataset_file_size_mb < float(self.settings.fits_volume_preview_size_threshold_mb):
+            return 1, None, 0.0
+
+        full_voxels = max(1, int(dims_xyz[0] * dims_xyz[1] * dims_xyz[2]))
+        voxel_budget_from_mb = max(1, int((self.settings.fits_volume_preview_max_mb * 1024 * 1024) / 4))
+        target_voxels = min(int(self.settings.fits_volume_preview_max_voxels), voxel_budget_from_mb)
+        if full_voxels <= target_voxels:
+            return 1, None, 0.0
+
+        stride = max(2, int((full_voxels / target_voxels) ** (1.0 / 3.0)))
+        while (dims_xyz[0] // stride or 1) * (dims_xyz[1] // stride or 1) * (dims_xyz[2] // stride or 1) > target_voxels:
+            stride += 1
+        preview_dims = tuple(max(1, int((dim + stride - 1) // stride)) for dim in dims_xyz)
+        estimated_mb = (preview_dims[0] * preview_dims[1] * preview_dims[2] * 4) / (1024 * 1024)
+        return stride, preview_dims, estimated_mb
 
     def _initial_volume_defaults(self, metadata: dict[str, Any]) -> tuple[float, float]:
         stats = metadata.get("stats") or {}
@@ -377,6 +435,60 @@ output = self.GetOutputDataObject(0)
 output.ShallowCopy(vtk_image)
 """
 
+    def _ensure_volume_preview_source(self) -> object | None:
+        assert self.pipeline is not None
+        if not self.pipeline.volume_preview_enabled:
+            return None
+        if self.pipeline.volume_preview_source is not None:
+            return self.pipeline.volume_preview_source
+
+        dataset_path = str((self.pipeline.dataset_metadata or {}).get("extra", {}).get("path") or "")
+        if not dataset_path:
+            return None
+
+        preview_source, preview_dims = self._create_fits_programmable_source(dataset_path, self.pipeline.volume_preview_stride)
+        self.pipeline.volume_preview_source = preview_source
+        self.pipeline.volume_preview_loaded = True
+        self.pipeline.volume_preview_dimensions = preview_dims
+        logger.info(
+            "Preview volume ready: stride=%s preview_dimensions=%s estimated_preview_mb=%.2f",
+            self.pipeline.volume_preview_stride,
+            preview_dims,
+            self.pipeline.volume_preview_estimated_mb,
+        )
+        return preview_source
+
+    def _release_volume_preview(self) -> None:
+        assert self.pipeline is not None
+        preview_source = self.pipeline.volume_preview_source
+        if preview_source is None:
+            return
+        try:
+            simple.Hide(preview_source, self.view)
+        except Exception:
+            pass
+        try:
+            simple.Delete(preview_source)
+        except Exception:
+            pass
+        self.pipeline.volume_preview_source = None
+        self.pipeline.volume_preview_loaded = False
+        logger.info("Preview volume released")
+
+    def load_full_resolution_volume(self) -> bool:
+        if self.pipeline is None or self.pipeline.dataset_type != "fits":
+            return False
+        if self.current_representation != "Volume":
+            return False
+        logger.info("Full-resolution volume requested")
+        self.pipeline.full_volume_requested = True
+        self._show_fits_object(self.pipeline.source, "Volume", reset_camera=False)
+        self.apply_colormap(self.pipeline.current_colormap)
+        self._apply_fits_volume_transfer_functions()
+        self._release_volume_preview()
+        logger.info("Full-resolution volume ready")
+        return True
+
     def apply_colormap(self, preset: str) -> None:
         if self.pipeline is None:
             return
@@ -420,6 +532,10 @@ output.ShallowCopy(vtk_image)
         normalized = representation if representation in {"Slice", "Volume", "Isocontour", "Outline"} else "Slice"
         logger.info("Applying FITS representation=%s", normalized)
 
+        if normalized != "Volume":
+            self.pipeline.full_volume_requested = False
+            self._release_volume_preview()
+
         if normalized == "Slice":
             if self.pipeline.fits_slice is None:
                 logger.warning("Slice requested but slice filter is not available")
@@ -435,9 +551,15 @@ output.ShallowCopy(vtk_image)
                 self.pipeline.iso_value,
                 self.pipeline.scalar_range,
             )
+        elif normalized == "Volume":
+            volume_source = self.pipeline.source
+            if self.pipeline.volume_preview_enabled and not self.pipeline.full_volume_requested:
+                preview_source = self._ensure_volume_preview_source()
+                if preview_source is not None:
+                    volume_source = preview_source
+            self._show_fits_object(volume_source, "Volume")
         else:
-            source_representation = "Volume" if normalized == "Volume" else "Outline"
-            self._show_fits_object(self.pipeline.source, source_representation)
+            self._show_fits_object(self.pipeline.source, "Outline")
 
         self.current_representation = normalized
         self.apply_colormap(self.pipeline.current_colormap)
@@ -491,7 +613,13 @@ output.ShallowCopy(vtk_image)
         details = self._inspect_dataset(next_source, self.pipeline.scalar_name)
         logger.info(
             "Showing object=%s representation=%s bounds=%s arrays(point=%s, cell=%s) active=%s range=%s",
-            "slice" if next_source is self.pipeline.fits_slice else "contour" if next_source is self.pipeline.fits_contour else "source",
+            "slice"
+            if next_source is self.pipeline.fits_slice
+            else "contour"
+            if next_source is self.pipeline.fits_contour
+            else "volume_preview"
+            if next_source is self.pipeline.volume_preview_source
+            else "source",
             representation,
             details["bounds"],
             details["point_arrays"],
@@ -599,7 +727,7 @@ output.ShallowCopy(vtk_image)
         if self.pipeline is None:
             return
 
-        for source in (self.pipeline.fits_contour, self.pipeline.fits_slice, self.pipeline.csv_surface, self.pipeline.source):
+        for source in (self.pipeline.volume_preview_source, self.pipeline.fits_contour, self.pipeline.fits_slice, self.pipeline.csv_surface, self.pipeline.source):
             if source is None:
                 continue
             try:
@@ -677,7 +805,7 @@ output.ShallowCopy(vtk_image)
         assert self.pipeline is not None
         if self.pipeline.dataset_type != "fits":
             return
-        self._hide_sources((self.pipeline.fits_slice, self.pipeline.fits_contour, self.pipeline.source))
+        self._hide_sources((self.pipeline.fits_slice, self.pipeline.fits_contour, self.pipeline.volume_preview_source, self.pipeline.source))
 
     def _hide_sources(self, sources: tuple[object | None, ...]) -> None:
         for obj in sources:
@@ -698,7 +826,8 @@ output.ShallowCopy(vtk_image)
 
     def _apply_fits_volume_transfer_functions(self) -> None:
         assert self.pipeline is not None
-        details = self._inspect_dataset(self.pipeline.source, self.pipeline.scalar_name)
+        volume_source = self.pipeline.volume_preview_source if self.pipeline.volume_preview_source is not None and not self.pipeline.full_volume_requested else self.pipeline.source
+        details = self._inspect_dataset(volume_source, self.pipeline.scalar_name)
         full_range = details["active_range"]
         robust_low, robust_high = self._compute_robust_volume_range(full_range)
 
@@ -719,7 +848,7 @@ output.ShallowCopy(vtk_image)
 
         logger.info(
             "Volume rendering configured: object=%s requested_colormap=%s applied_colormap=%s full_range=%s robust_range=(%s, %s) threshold=%s opacity_scale=%s opacity_points=%s pwf_points=%s rgb_points=%s volume_preset=%s representation=%s",
-            type(self.pipeline.source).__name__,
+            type(volume_source).__name__,
             self.pipeline.current_colormap,
             self.pipeline.current_colormap,
             full_range,
@@ -788,6 +917,10 @@ output.ShallowCopy(vtk_image)
             if self.current_representation == "Surface" and self.pipeline.csv_surface is not None:
                 return self.pipeline.csv_surface
             return self.pipeline.source
+        if self.current_representation == "Volume":
+            if self.pipeline.volume_preview_source is not None and not self.pipeline.full_volume_requested:
+                return self.pipeline.volume_preview_source
+            return self.pipeline.source
         if self.current_representation == "Slice" and self.pipeline.fits_slice is not None:
             return self.pipeline.fits_slice
         if self.current_representation == "Isocontour" and self.pipeline.fits_contour is not None:
@@ -802,6 +935,8 @@ output.ShallowCopy(vtk_image)
             return "slice"
         if current is self.pipeline.fits_contour:
             return "contour"
+        if current is self.pipeline.volume_preview_source:
+            return "volume_preview"
         if current is self.pipeline.source:
             return "source"
         if current is self.pipeline.csv_surface:

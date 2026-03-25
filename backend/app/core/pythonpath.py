@@ -1,10 +1,23 @@
 import logging
 import os
 import site
+import sys
 from pathlib import Path
 
 
 logger = logging.getLogger(__name__)
+
+
+def _prepend_site_package(path: str) -> None:
+    if path in sys.path:
+        sys.path.remove(path)
+    sys.path.insert(0, path)
+    # Keep .pth processing, but restore precedence afterward because addsitedir
+    # appends paths near the end and ParaView's embedded stdlib can otherwise win.
+    site.addsitedir(path)
+    if path in sys.path:
+        sys.path.remove(path)
+    sys.path.insert(0, path)
 
 
 def bootstrap_external_site_packages() -> list[str]:
@@ -14,7 +27,7 @@ def bootstrap_external_site_packages() -> list[str]:
     if explicit_paths:
         for item in explicit_paths.split(os.pathsep):
             if item and Path(item).exists():
-                site.addsitedir(item)
+                _prepend_site_package(item)
                 added_paths.append(item)
         warn_if_numpy_paraview_incompatible()
         return added_paths
@@ -33,8 +46,9 @@ def bootstrap_external_site_packages() -> list[str]:
 
     for candidate in candidates:
         if candidate.exists():
-            site.addsitedir(str(candidate))
-            added_paths.append(str(candidate))
+            candidate_str = str(candidate)
+            _prepend_site_package(candidate_str)
+            added_paths.append(candidate_str)
 
     warn_if_numpy_paraview_incompatible()
     return added_paths

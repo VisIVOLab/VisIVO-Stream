@@ -177,6 +177,10 @@ Relevant local config in `backend/.env`:
 - `RUNTIME_UPLOAD_DIR=./runtime/uploads`
 - `MAX_UPLOAD_SIZE_MB=256`
 - `FITS_PREVIEW_FACTOR=1`
+- `FITS_VOLUME_PREVIEW_AUTO_ENABLE=true`
+- `FITS_VOLUME_PREVIEW_SIZE_THRESHOLD_MB=256`
+- `FITS_VOLUME_PREVIEW_MAX_VOXELS=2097152`
+- `FITS_VOLUME_PREVIEW_MAX_MB=128`
 
 ### 2. Interactive Viewer
 
@@ -233,11 +237,13 @@ Interactive exploration controls:
 - runtime dataset selection from the API catalog
 - remote filesystem browser rooted at `REMOTE_DATA_ROOT`
 - Slice controls: axis `X/Y/Z` and slice index
-- Volume controls: preset, threshold, opacity scale
+- Volume controls: preset, threshold, opacity scale, and explicit `Load Full Resolution`
 - Isocontour controls: iso value slider
 - metadata panel with dimensions, scalar range, mean, rms, origin, and current representation
 
 Browser upload can still remain as a secondary extension point, but the main runtime workflow is now server-side browsing and direct FITS loading.
+
+For large FITS cubes, Volume mode can switch to a memory-safe preview source automatically. The preview stride is derived from the configured voxel/memory budget and is created only when the user enters `Volume`. `Slice`, `Isocontour`, and `Outline` continue to use the normal authoritative source path.
 
 ## Main API Endpoints
 

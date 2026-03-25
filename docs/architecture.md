@@ -102,6 +102,8 @@ The active interactive workflow keeps a single authoritative ParaView source for
 
 Runtime dataset loading rebuilds that same pipeline cleanly rather than creating parallel viewer states.
 
+For large FITS datasets, `Volume` can use a temporary memory-safe preview source generated on demand from an early downsampled NumPy array. This preview is isolated to the `Volume` path, can be released explicitly, and does not change the steady-state ParaView model used by `Slice`, `Isocontour`, or `Outline`.
+
 The main runtime workflow is now:
 
 - browse the remote server filesystem under `REMOTE_DATA_ROOT`

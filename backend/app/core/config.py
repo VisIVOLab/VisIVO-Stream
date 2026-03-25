@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 256
     remote_data_root: Path = Field(default=Path("./data"))
     remote_browser_show_hidden: bool = False
+    fits_volume_preview_auto_enable: bool = True
+    fits_volume_preview_size_threshold_mb: int = 256
+    fits_volume_preview_max_voxels: int = 2_097_152
+    fits_volume_preview_max_mb: int = 128
     renders_dir: Path = Field(default=Path("/app/renders"))
     interactive_logs_dir: Path = Field(default=Path("./runtime/interactive"))
     paraview_script: Path = Field(default=Path("/app/scripts/render_dataset.py"))

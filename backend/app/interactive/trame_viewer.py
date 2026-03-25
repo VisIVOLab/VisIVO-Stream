@@ -12,9 +12,10 @@ from paraview import simple
 
 from app.core.logging import configure_logging
 from app.core.pythonpath import bootstrap_external_site_packages
-from app.interactive.pipeline import RemotePipelineController
 
 bootstrap_external_site_packages()
+
+from app.interactive.pipeline import RemotePipelineController
 
 from trame.app import get_server
 from trame.ui.vuetify import SinglePageWithDrawerLayout
@@ -129,6 +130,9 @@ class PvServerTrameViewer:
         self.state.volume_preset_options = ["soft", "medium", "strong"]
         self.state.volume_threshold = 0.0
         self.state.opacity_scale = 1.0
+        self.state.volume_preview_available = False
+        self.state.volume_preview_stride = 1
+        self.state.volume_preview_estimated_mb = 0.0
         self.state.iso_value = 0.0
         self.state.iso_min = 0.0
         self.state.iso_max = 1.0
@@ -284,6 +288,22 @@ class PvServerTrameViewer:
                         classes="mb-4",
                         v_if="representation === 'Volume'",
                     )
+                    vuetify.VBtn(
+                        "Load Full Resolution",
+                        click=self.load_full_resolution_volume,
+                        outlined=True,
+                        classes="mb-4",
+                        block=True,
+                        v_if="representation === 'Volume' && volume_preview_available",
+                    )
+                    vuetify.VAlert(
+                        "{{ volume_preview_available ? ('Preview stride: ' + volume_preview_stride + ' | est. MB: ' + volume_preview_estimated_mb) : 'Full resolution volume active' }}",
+                        type="info",
+                        dense=True,
+                        outlined=True,
+                        classes="mb-4",
+                        v_if="representation === 'Volume'",
+                    )
                     vuetify.VSlider(
                         label="Volume Threshold",
                         v_model=("volume_threshold", 0.0),
@@ -395,6 +415,9 @@ class PvServerTrameViewer:
             if self.pipeline.pipeline is not None:
                 self.state.volume_threshold = self.pipeline.pipeline.volume_threshold
                 self.state.opacity_scale = self.pipeline.pipeline.opacity_scale
+                self.state.volume_preview_available = self.pipeline.pipeline.volume_preview_enabled and not self.pipeline.pipeline.full_volume_requested
+                self.state.volume_preview_stride = self.pipeline.pipeline.volume_preview_stride
+                self.state.volume_preview_estimated_mb = f'{self.pipeline.pipeline.volume_preview_estimated_mb:.2f}'
                 self.state.iso_value = self.pipeline.pipeline.iso_value
                 self.state.iso_min = self.pipeline.pipeline.iso_min
                 self.state.iso_max = self.pipeline.pipeline.iso_max
@@ -531,6 +554,19 @@ class PvServerTrameViewer:
         self.state.status_message = "Contrast reset"
         self._safe_view_update()
 
+    def load_full_resolution_volume(self, *args, **kwargs) -> None:
+        del args, kwargs
+        if self.pipeline is None:
+            return
+        switched = self.pipeline.load_full_resolution_volume()
+        if not switched:
+            self.state.status_message = "Full-resolution volume is not active or not needed."
+            self._safe_view_update()
+            return
+        self.state.volume_preview_available = False
+        self.state.status_message = "Full-resolution volume loaded"
+        self._safe_view_update()
+
     def _handle_representation_change(self, representation, **_kwargs) -> None:
         if self.pipeline is None or not representation:
             return
@@ -539,6 +575,8 @@ class PvServerTrameViewer:
         logger.info("Representation changed from %s to %s", previous, representation)
         logger.info("Applying representation=%s", representation)
         self.pipeline.set_representation(representation)
+        if self.pipeline.pipeline is not None:
+            self.state.volume_preview_available = self.pipeline.pipeline.volume_preview_enabled and not self.pipeline.pipeline.full_volume_requested
         self.state.status_message = f"Representation set to {representation}"
         self._safe_view_update()
 
@@ -555,6 +593,8 @@ class PvServerTrameViewer:
             return
         logger.info("Changing volume preset to %s", volume_preset)
         self.pipeline.set_volume_preset(volume_preset)
+        if self.pipeline.pipeline is not None:
+            self.state.volume_preview_available = self.pipeline.pipeline.volume_preview_enabled and not self.pipeline.pipeline.full_volume_requested
         self.state.status_message = f"Volume preset set to {volume_preset}"
         self._safe_view_update()
 
@@ -563,6 +603,8 @@ class PvServerTrameViewer:
             return
         logger.info("Changing volume threshold to %s", volume_threshold)
         self.pipeline.set_volume_threshold(float(volume_threshold))
+        if self.pipeline.pipeline is not None:
+            self.state.volume_preview_available = self.pipeline.pipeline.volume_preview_enabled and not self.pipeline.pipeline.full_volume_requested
         self.state.status_message = f"Volume threshold set to {volume_threshold:.2f}"
         self._safe_view_update()
 
@@ -571,6 +613,8 @@ class PvServerTrameViewer:
             return
         logger.info("Changing opacity scale to %s", opacity_scale)
         self.pipeline.set_opacity_scale(float(opacity_scale))
+        if self.pipeline.pipeline is not None:
+            self.state.volume_preview_available = self.pipeline.pipeline.volume_preview_enabled and not self.pipeline.pipeline.full_volume_requested
         self.state.status_message = f"Opacity scale set to {opacity_scale:.2f}"
         self._safe_view_update()
 
