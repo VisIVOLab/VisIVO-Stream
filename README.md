@@ -172,6 +172,8 @@ When using ParaView 6.0.1, make sure the exposed environment also resolves to `n
 
 Relevant local config in `backend/.env`:
 
+- `REMOTE_DATA_ROOT=./data`
+- `REMOTE_BROWSER_SHOW_HIDDEN=false`
 - `RUNTIME_UPLOAD_DIR=./runtime/uploads`
 - `MAX_UPLOAD_SIZE_MB=256`
 - `FITS_PREVIEW_FACTOR=1`
@@ -193,7 +195,8 @@ The viewer will be available at:
 You can now start the viewer without a dataset and:
 
 - select a built-in dataset from the viewer dropdown
-- upload a FITS file at runtime from the viewer
+- browse the remote server filesystem under `REMOTE_DATA_ROOT`
+- select a FITS file already present on the server
 - load it without restarting the trame process
 
 ### 3. Fallback Preview Rendering
@@ -228,11 +231,13 @@ For FITS 3D, the interactive pipeline uses a single authoritative ParaView sourc
 Interactive exploration controls:
 
 - runtime dataset selection from the API catalog
-- runtime FITS upload into `RUNTIME_UPLOAD_DIR`
+- remote filesystem browser rooted at `REMOTE_DATA_ROOT`
 - Slice controls: axis `X/Y/Z` and slice index
 - Volume controls: preset, threshold, opacity scale
 - Isocontour controls: iso value slider
 - metadata panel with dimensions, scalar range, mean, rms, origin, and current representation
+
+Browser upload can still remain as a secondary extension point, but the main runtime workflow is now server-side browsing and direct FITS loading.
 
 ## Main API Endpoints
 
@@ -240,8 +245,9 @@ Base path: `/api/v1`
 
 - `GET /health`
 - `GET /datasets`
-- `POST /datasets/upload`
 - `POST /datasets/load`
+- `GET /files/browser`
+- `POST /datasets/load-path`
 - `GET /datasets/{dataset_id}/metadata`
 - `GET /datasets/{dataset_id}/fits-header`
 - `POST /sessions`

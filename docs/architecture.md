@@ -50,7 +50,7 @@ Fallback backend:
 Responsibilities:
 
 - dataset discovery
-- runtime upload and registration of FITS datasets
+- runtime browsing and registration of FITS datasets from a server-side root
 - FITS IO through `astropy.io.fits`
 - metadata extraction and validation
 - conversion from NumPy arrays to `vtkImageData`
@@ -74,7 +74,7 @@ Responsibilities:
 
 - connect the browser viewer to `pvserver`
 - expose view controls and representation changes
-- allow runtime dataset selection and upload through the API
+- allow runtime dataset selection through the API and remote filesystem browser
 - drive remote ParaView state through a trame application
 
 Key files:
@@ -101,6 +101,13 @@ The active interactive workflow keeps a single authoritative ParaView source for
 - `Outline` -> `source`
 
 Runtime dataset loading rebuilds that same pipeline cleanly rather than creating parallel viewer states.
+
+The main runtime workflow is now:
+
+- browse the remote server filesystem under `REMOTE_DATA_ROOT`
+- select an existing FITS file
+- register/load it through the API
+- rebuild the same single-source ParaView pipeline in-place
 
 ## Deployment Modes
 

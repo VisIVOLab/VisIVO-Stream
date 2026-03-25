@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import quote
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
@@ -17,7 +18,7 @@ bootstrap_external_site_packages()
 
 from trame.app import get_server
 from trame.ui.vuetify import SinglePageWithDrawerLayout
-from trame.widgets import html, paraview, vuetify
+from trame.widgets import paraview, vuetify
 
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ class PvServerTrameViewer:
         self.connected = False
         self.pipeline: RemotePipelineController | None = None
         self.view = None
+        self.remote_browser_entry_map: dict[str, dict] = {}
 
         self._configure_state()
         self._connect_to_pvserver()
@@ -111,6 +113,11 @@ class PvServerTrameViewer:
         self.state.representation_options = []
         self.state.selected_dataset_id = self.session_info.get("dataset_id") or ""
         self.state.dataset_options = []
+        self.state.remote_browser_path = ""
+        self.state.remote_browser_parent = ""
+        self.state.remote_browser_entries = []
+        self.state.remote_browser_selection = ""
+        self.state.selected_remote_file = ""
         self.state.colormap = "Viridis (matplotlib)"
         self.state.colormap_options = [
             {"text": "Viridis", "value": "Viridis (matplotlib)"},
@@ -137,7 +144,6 @@ class PvServerTrameViewer:
         self.state.dataset_rms = "-"
         self.state.dataset_origin = "-"
         self.state.dataset_uploaded = False
-        self.state.upload_feedback = ""
         self.state.status_message = "Connecting to pvserver"
 
     def _connect_to_pvserver(self) -> None:
@@ -172,7 +178,6 @@ class PvServerTrameViewer:
         self.state.change("iso_value")(self._handle_iso_value_change)
         self.state.change("slice_axis")(self._handle_slice_axis_change)
         self.state.change("slice_index")(self._handle_slice_index_change)
-        self.state.change("upload_feedback")(self._handle_upload_feedback)
 
     def _build_ui(self) -> None:
         assert self.view is not None
@@ -204,22 +209,24 @@ class PvServerTrameViewer:
                         classes="mb-2",
                     )
                     vuetify.VBtn("Load Dataset", click=self.load_selected_dataset, classes="mb-4", block=True)
-                    html.Input(id="visivo-upload-feedback", v_model=("upload_feedback", ""), style="display: none;")
-                    html.Input(id="visivo-upload-input", type="file", accept=".fits,.fit", style="display: none;")
-                    vuetify.VBtn(
-                        "Choose FITS File",
-                        click="document.getElementById('visivo-upload-input').click()",
+                    vuetify.VCardTitle("Remote Browser")
+                    vuetify.VAlert("{{ 'Path: /' + remote_browser_path }}", type="info", dense=True, outlined=True, classes="mb-2")
+                    vuetify.VSelect(
+                        label="Entries",
+                        items=("remote_browser_entries", []),
+                        v_model=("remote_browser_selection", ""),
+                        item_text="text",
+                        item_value="value",
+                        hide_details=True,
+                        dense=True,
                         outlined=True,
                         classes="mb-2",
-                        block=True,
                     )
-                    vuetify.VBtn(
-                        "Upload FITS",
-                        click="visivoUploadDataset()",
-                        outlined=True,
-                        classes="mb-4",
-                        block=True,
-                    )
+                    vuetify.VBtn("Up", click=self.browse_remote_up, outlined=True, classes="mb-2 mr-2")
+                    vuetify.VBtn("Open Selected", click=self.open_remote_selection, outlined=True, classes="mb-2")
+                    vuetify.VBtn("Select FITS", click=self.select_remote_file, outlined=True, classes="mb-2 mr-2")
+                    vuetify.VBtn("Load Selected File", click=self.load_selected_remote_file, classes="mb-4")
+                    vuetify.VAlert("{{ selected_remote_file ? ('Selected file: ' + selected_remote_file) : 'No remote file selected' }}", type="info", dense=True, outlined=True, classes="mb-4")
                     vuetify.VCardTitle("Metadata")
                     vuetify.VAlert("{{ 'Origin: ' + dataset_origin + (dataset_uploaded ? ' (uploaded)' : '') }}", type="info", dense=True, outlined=True, classes="mb-2")
                     vuetify.VAlert("{{ 'Dimensions: ' + dataset_dimensions }}", type="info", dense=True, outlined=True, classes="mb-2")
@@ -312,42 +319,6 @@ class PvServerTrameViewer:
                     )
                     vuetify.VBtn("Reset Contrast", click=self.reset_contrast, outlined=True, classes="mb-4")
                     vuetify.VAlert("{{ status_message }}", type="info", dense=True, outlined=True)
-                    html.Script(
-                        f"""
-window.visivoUploadDataset = async function() {{
-  const fileInput = document.getElementById('visivo-upload-input');
-  const feedback = document.getElementById('visivo-upload-feedback');
-  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {{
-    if (feedback) {{
-      feedback.value = JSON.stringify({{ error: 'Select a FITS file first.' }});
-      feedback.dispatchEvent(new Event('input', {{ bubbles: true }}));
-    }}
-    return;
-  }}
-
-  const formData = new FormData();
-  formData.append('file', fileInput.files[0]);
-
-  try {{
-    const response = await fetch('{self.api_base_url}/datasets/upload', {{
-      method: 'POST',
-      body: formData,
-    }});
-    const data = await response.json();
-    if (feedback) {{
-      feedback.value = JSON.stringify(data);
-      feedback.dispatchEvent(new Event('input', {{ bubbles: true }}));
-    }}
-    fileInput.value = '';
-  }} catch (error) {{
-    if (feedback) {{
-      feedback.value = JSON.stringify({{ error: String(error) }});
-      feedback.dispatchEvent(new Event('input', {{ bubbles: true }}));
-    }}
-  }}
-}};
-"""
-                    )
 
             with layout.content:
                 with vuetify.VContainer(fluid=True, classes="pa-0 fill-height"):
@@ -359,6 +330,7 @@ window.visivoUploadDataset = async function() {{
     def _on_server_ready(self, **_kwargs) -> None:
         logger.info("trame server ready, fetching dataset catalog")
         self.refresh_dataset_catalog()
+        self.refresh_remote_browser()
         if self.session_info.get("dataset_id"):
             self.reload_dataset()
         else:
@@ -377,6 +349,22 @@ window.visivoUploadDataset = async function() {{
         if not self.state.selected_dataset_id and datasets:
             self.state.selected_dataset_id = datasets[0]["id"]
         logger.info("Dataset catalog refreshed: count=%s", len(datasets))
+
+    def refresh_remote_browser(self, relative_path: str = "") -> None:
+        payload = fetch_json("GET", f"{self.api_base_url}/files/browser?path={quote(relative_path or '', safe='/')}")
+        self.state.remote_browser_path = payload.get("current_path", "")
+        self.state.remote_browser_parent = payload.get("parent_path") or ""
+        entries = payload.get("entries", [])
+        self.remote_browser_entry_map = {entry["relative_path"]: entry for entry in entries}
+        self.state.remote_browser_entries = [
+            {
+                "text": f'[{entry["entry_type"]}] {entry["name"]}',
+                "value": entry["relative_path"],
+            }
+            for entry in entries
+        ]
+        self.state.remote_browser_selection = ""
+        logger.info("Remote browser refreshed: path=%s entries=%s", self.state.remote_browser_path or "/", len(entries))
 
     def _safe_view_update(self, **_kwargs) -> None:
         if hasattr(self.ctrl, "view_update"):
@@ -452,6 +440,75 @@ window.visivoUploadDataset = async function() {{
         self.state.dataset_name = dataset["name"]
         self.state.dataset_type = dataset["dataset_type"]
         self.state.dataset_path = metadata["extra"].get("path", "")
+        self.reload_dataset()
+
+    def browse_remote_up(self, *args, **kwargs) -> None:
+        del args, kwargs
+        self.refresh_remote_browser(self.state.remote_browser_parent)
+        self.state.status_message = f'Browsing /{self.state.remote_browser_path or ""}'
+        self._safe_view_update()
+
+    def open_remote_selection(self, *args, **kwargs) -> None:
+        del args, kwargs
+        selection = self.state.remote_browser_selection
+        if not selection:
+            self.state.status_message = "Select a remote entry first."
+            self._safe_view_update()
+            return
+        entry = self.remote_browser_entry_map.get(selection)
+        if entry is None:
+            self.state.status_message = "Selected entry is no longer available."
+            self._safe_view_update()
+            return
+        if not entry.get("is_dir"):
+            self.state.selected_remote_file = selection
+            self.state.status_message = f"Selected remote file: {selection}"
+            self._safe_view_update()
+            return
+        self.refresh_remote_browser(selection)
+        self.state.status_message = f'Browsing /{self.state.remote_browser_path or ""}'
+        self._safe_view_update()
+
+    def select_remote_file(self, *args, **kwargs) -> None:
+        del args, kwargs
+        selection = self.state.remote_browser_selection
+        if not selection:
+            self.state.status_message = "Select a FITS entry first."
+            self._safe_view_update()
+            return
+        entry = self.remote_browser_entry_map.get(selection)
+        if entry is None or entry.get("entry_type") != "fits":
+            self.state.status_message = "Selected entry is not a FITS file."
+            self._safe_view_update()
+            return
+        self.state.selected_remote_file = selection
+        logger.info("Selected remote file from browser: path=%s", selection)
+        self.state.status_message = f"Selected remote file: {selection}"
+        self._safe_view_update()
+
+    def load_selected_remote_file(self, *args, **kwargs) -> None:
+        del args, kwargs
+        if self.pipeline is None:
+            return
+        relative_path = self.state.selected_remote_file
+        if not relative_path:
+            self.state.status_message = "Select a remote FITS file first."
+            self._safe_view_update()
+            return
+        logger.info("Loading remote dataset path from viewer: path=%s", relative_path)
+        payload = fetch_json("POST", f"{self.api_base_url}/datasets/load-path", {"relative_path": relative_path})
+        dataset = payload["dataset"]
+        metadata = payload["metadata"]
+        self.session_info["dataset_id"] = dataset["id"]
+        self.session_info["dataset_name"] = dataset["name"]
+        self.session_info["dataset_path"] = metadata["extra"].get("path", "")
+        self.session_info["dataset_type"] = dataset["dataset_type"]
+        self.session_info["dataset_metadata"] = metadata
+        self.state.selected_dataset_id = dataset["id"]
+        self.state.dataset_name = dataset["name"]
+        self.state.dataset_type = dataset["dataset_type"]
+        self.state.dataset_path = metadata["extra"].get("path", "")
+        self.refresh_dataset_catalog()
         self.reload_dataset()
 
     def reset_camera(self, *args, **kwargs) -> None:
@@ -545,31 +602,6 @@ window.visivoUploadDataset = async function() {{
         if self.pipeline.pipeline is not None:
             self.state.slice_index = self.pipeline.pipeline.slice_index
         self.state.status_message = f"Slice index set to {int(slice_index)}"
-        self._safe_view_update()
-
-    def _handle_upload_feedback(self, upload_feedback, **_kwargs) -> None:
-        if not upload_feedback:
-            return
-        try:
-            payload = json.loads(upload_feedback)
-        except json.JSONDecodeError:
-            self.state.status_message = "Upload failed: invalid server response"
-            self.state.upload_feedback = ""
-            return
-
-        if payload.get("error") or payload.get("detail"):
-            self.state.status_message = f"Upload failed: {payload.get('error') or payload.get('detail')}"
-            self.state.upload_feedback = ""
-            self._safe_view_update()
-            return
-
-        dataset = payload.get("dataset") or {}
-        self.refresh_dataset_catalog()
-        if dataset.get("id"):
-            self.state.selected_dataset_id = dataset["id"]
-        self.state.status_message = f"Dataset uploaded: {dataset.get('name', dataset.get('id', 'dataset'))}"
-        logger.info("Dataset uploaded from viewer: dataset_id=%s", dataset.get("id"))
-        self.state.upload_feedback = ""
         self._safe_view_update()
 
     def _update_dataset_metadata_state(self, metadata: dict) -> None:

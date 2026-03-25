@@ -1,6 +1,6 @@
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, Query, UploadFile
 
-from app.models.dataset import DatasetLoadRequest
+from app.models.dataset import DatasetLoadPathRequest, DatasetLoadRequest
 from app.models.interactive import InteractiveSessionCreateRequest
 from app.models.render import CreateSessionRequest, RenderRequest
 from app.interactive.session_manager import InteractiveSessionManager
@@ -55,6 +55,16 @@ def upload_dataset(file: UploadFile = File(...)):
 @router.post("/datasets/load")
 def load_dataset(payload: DatasetLoadRequest):
     return dataset_catalog.load(payload.dataset_id)
+
+
+@router.get("/files/browser")
+def browse_remote_files(path: str = Query(default="")):
+    return dataset_catalog.browse_remote(path)
+
+
+@router.post("/datasets/load-path")
+def load_dataset_from_path(payload: DatasetLoadPathRequest):
+    return dataset_catalog.load_remote_path(payload.relative_path)
 
 
 @router.post("/sessions")

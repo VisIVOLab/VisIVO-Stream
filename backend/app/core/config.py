@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     datasets_dir: Path = Field(default=Path("/app/data/samples"))
     runtime_upload_dir: Path = Field(default=Path("./runtime/uploads"))
     max_upload_size_mb: int = 256
+    remote_data_root: Path = Field(default=Path("./data"))
+    remote_browser_show_hidden: bool = False
     renders_dir: Path = Field(default=Path("/app/renders"))
     interactive_logs_dir: Path = Field(default=Path("./runtime/interactive"))
     paraview_script: Path = Field(default=Path("/app/scripts/render_dataset.py"))

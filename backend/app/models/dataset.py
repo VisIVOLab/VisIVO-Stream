@@ -44,3 +44,20 @@ class DatasetLoadRequest(BaseModel):
 class DatasetLoadResponse(BaseModel):
     dataset: DatasetSummary
     metadata: DatasetMetadata
+
+
+class DatasetLoadPathRequest(BaseModel):
+    relative_path: str
+
+
+class FileBrowserEntry(BaseModel):
+    name: str
+    relative_path: str
+    entry_type: Literal["directory", "fits", "other"]
+    is_dir: bool = False
+
+
+class FileBrowserResponse(BaseModel):
+    current_path: str
+    parent_path: str | None = None
+    entries: list[FileBrowserEntry] = Field(default_factory=list)

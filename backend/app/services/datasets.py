@@ -8,7 +8,13 @@ from fastapi import HTTPException, UploadFile
 
 from app.core.config import get_settings
 from app.datasets.fits_metadata import extract_fits_header, extract_fits_metadata
-from app.models.dataset import DatasetLoadResponse, DatasetMetadata, DatasetRecord
+from app.models.dataset import (
+    DatasetLoadResponse,
+    DatasetMetadata,
+    DatasetRecord,
+    FileBrowserEntry,
+    FileBrowserResponse,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -17,12 +23,23 @@ logger = logging.getLogger(__name__)
 class DatasetCatalog:
     SUPPORTED_RUNTIME_SUFFIXES = {".fits", ".fit"}
 
-    def __init__(self, base_dir: Path, runtime_upload_dir: Path, max_upload_size_mb: int) -> None:
+    def __init__(
+        self,
+        base_dir: Path,
+        runtime_upload_dir: Path,
+        max_upload_size_mb: int,
+        remote_data_root: Path,
+        remote_browser_show_hidden: bool,
+    ) -> None:
         self.base_dir = base_dir
         self.runtime_upload_dir = runtime_upload_dir
         self.max_upload_size_bytes = max_upload_size_mb * 1024 * 1024
+        self.remote_data_root = remote_data_root.resolve()
+        self.remote_browser_show_hidden = remote_browser_show_hidden
+        self._registered_runtime_paths: dict[str, Path] = {}
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.runtime_upload_dir.mkdir(parents=True, exist_ok=True)
+        self.remote_data_root.mkdir(parents=True, exist_ok=True)
         self._datasets: dict[str, DatasetRecord] = {}
         self.refresh()
 
@@ -59,7 +76,25 @@ class DatasetCatalog:
 
         self._append_fits_from_dir(datasets, self.base_dir, origin="sample")
         self._append_fits_from_dir(datasets, self.runtime_upload_dir, origin="upload")
+        self._append_registered_runtime_paths(datasets)
         return datasets
+
+    def _append_registered_runtime_paths(self, datasets: dict[str, DatasetRecord]) -> None:
+        for dataset_id, path in sorted(self._registered_runtime_paths.items()):
+            if not path.exists() or path.suffix.lower() not in self.SUPPORTED_RUNTIME_SUFFIXES:
+                continue
+            datasets[dataset_id] = DatasetRecord(
+                id=dataset_id,
+                name=path.stem.replace("_", " ").title(),
+                description="FITS scientific dataset selected from the remote server filesystem.",
+                file_name=path.name,
+                path=path,
+                dataset_type="fits",
+                origin="upload",
+                uploaded=False,
+                scalar_fields=["FITSImage"],
+                point_count_hint=0,
+            )
 
     def _append_fits_from_dir(self, datasets: dict[str, DatasetRecord], directory: Path, origin: str) -> None:
         for path in sorted(directory.glob("*")):
@@ -127,6 +162,62 @@ class DatasetCatalog:
     def load(self, dataset_id: str) -> DatasetLoadResponse:
         dataset = self.get(dataset_id)
         return DatasetLoadResponse(dataset=dataset, metadata=self.metadata(dataset_id))
+
+    def load_remote_path(self, relative_path: str) -> DatasetLoadResponse:
+        resolved = self.resolve_remote_path(relative_path)
+        if resolved.suffix.lower() not in self.SUPPORTED_RUNTIME_SUFFIXES:
+            raise HTTPException(status_code=400, detail="Selected remote file is not a FITS dataset.")
+        if not resolved.is_file():
+            raise HTTPException(status_code=400, detail="Selected remote path is not a file.")
+
+        existing = next((dataset_id for dataset_id, path in self._registered_runtime_paths.items() if path == resolved), None)
+        dataset_id = existing or self._unique_dataset_id(resolved.stem, self._datasets | {})
+        self._registered_runtime_paths[dataset_id] = resolved
+        self.refresh()
+        logger.info("Loaded remote dataset path: dataset_id=%s path=%s", dataset_id, resolved)
+        return self.load(dataset_id)
+
+    def browse_remote(self, relative_path: str = "") -> FileBrowserResponse:
+        current_path = self.resolve_remote_path(relative_path)
+        if not current_path.exists():
+            raise HTTPException(status_code=404, detail=f"Remote path '{relative_path}' not found.")
+        if not current_path.is_dir():
+            raise HTTPException(status_code=400, detail=f"Remote path '{relative_path}' is not a directory.")
+
+        entries: list[FileBrowserEntry] = []
+        for item in sorted(current_path.iterdir(), key=lambda value: (not value.is_dir(), value.name.lower())):
+            if not self.remote_browser_show_hidden and item.name.startswith("."):
+                continue
+            entry_type = "directory" if item.is_dir() else "fits" if item.suffix.lower() in self.SUPPORTED_RUNTIME_SUFFIXES else "other"
+            rel = item.relative_to(self.remote_data_root).as_posix()
+            entries.append(
+                FileBrowserEntry(
+                    name=item.name,
+                    relative_path="" if rel == "." else rel,
+                    entry_type=entry_type,
+                    is_dir=item.is_dir(),
+                )
+            )
+
+        rel_current = current_path.relative_to(self.remote_data_root).as_posix()
+        rel_current = "" if rel_current == "." else rel_current
+        parent = None
+        if current_path != self.remote_data_root:
+            parent_rel = current_path.parent.relative_to(self.remote_data_root).as_posix()
+            parent = "" if parent_rel == "." else parent_rel
+
+        logger.info("Browsed remote path: path=%s entries=%s", rel_current or "/", len(entries))
+        return FileBrowserResponse(current_path=rel_current, parent_path=parent, entries=entries)
+
+    def resolve_remote_path(self, relative_path: str) -> Path:
+        relative = (relative_path or "").strip().lstrip("/")
+        candidate = (self.remote_data_root / relative).resolve()
+        try:
+            candidate.relative_to(self.remote_data_root)
+        except ValueError as exc:
+            logger.warning("Rejected remote path outside root: requested=%s resolved=%s", relative_path, candidate)
+            raise HTTPException(status_code=400, detail="Requested path is outside REMOTE_DATA_ROOT.") from exc
+        return candidate
 
     def upload_fits(self, file: UploadFile) -> DatasetLoadResponse:
         file_name = file.filename or "dataset.fits"
@@ -223,4 +314,6 @@ def get_dataset_catalog() -> DatasetCatalog:
         base_dir=settings.datasets_dir,
         runtime_upload_dir=settings.runtime_upload_dir,
         max_upload_size_mb=settings.max_upload_size_mb,
+        remote_data_root=settings.remote_data_root,
+        remote_browser_show_hidden=settings.remote_browser_show_hidden,
     )

@@ -20,16 +20,6 @@ Ogni dataset espone anche:
 - `origin`
 - `uploaded`
 
-### `POST /datasets/upload`
-
-Carica un nuovo dataset FITS a runtime tramite multipart upload.
-
-Vincoli:
-
-- supporta `.fits` e `.fit`
-- salva il file nella directory runtime configurata
-- restituisce dataset registrato e metadata
-
 ### `POST /datasets/load`
 
 Restituisce record e metadata di un dataset già registrato, utile per il viewer runtime.
@@ -41,6 +31,40 @@ Payload:
   "dataset_id": "wallaby_upload_1"
 }
 ```
+
+### `GET /files/browser`
+
+Esplora il filesystem remoto sotto `REMOTE_DATA_ROOT`.
+
+Query param:
+
+- `path`
+
+La risposta contiene:
+
+- `current_path`
+- `parent_path`
+- `entries`
+
+Ogni entry indica:
+
+- `directory`
+- `fits`
+- `other`
+
+### `POST /datasets/load-path`
+
+Carica un file FITS già presente sul server, validato rispetto a `REMOTE_DATA_ROOT`.
+
+Payload:
+
+```json
+{
+  "relative_path": "observations/wallaby/WALLABY.fits"
+}
+```
+
+Il path viene normalizzato e bloccato se tenta di uscire da `REMOTE_DATA_ROOT`.
 
 ### `GET /datasets/{dataset_id}/metadata`
 
@@ -129,7 +153,7 @@ Payload esempio locale:
 }
 ```
 
-`dataset_id` è opzionale: il viewer può partire senza dataset e caricarne uno successivamente via UI o API.
+`dataset_id` è opzionale: il viewer può partire senza dataset e caricarne uno successivamente via UI o API, tipicamente tramite il browser remoto del filesystem server-side.
 
 Payload esempio MPI:
 
