@@ -15,10 +15,7 @@ logger = logging.getLogger(__name__)
 class RemotePipelineState:
     dataset_type: str
     source: object
-    full_source: object | None
-    preview_source: object | None
     display: object
-    active_source: object
     view: object
     scalar_name: str
     scalar_range: tuple[float, float]
@@ -35,10 +32,7 @@ class RemotePipelineState:
     iso_value: float = 0.0
     iso_min: float = 0.0
     iso_max: float = 1.0
-    preview_factor: int = 1
-    is_preview_mode: bool = False
-    full_dimensions: tuple[int, int, int] | None = None
-    preview_dimensions: tuple[int, int, int] | None = None
+    downsample_factor: int = 1
 
 
 class RemotePipelineController:
@@ -86,29 +80,24 @@ class RemotePipelineController:
         self.pipeline = RemotePipelineState(
             dataset_type="csv",
             source=points,
-            full_source=points,
-            preview_source=None,
             csv_surface=surface,
             display=display,
-            active_source=points,
             view=self.view,
             scalar_name="density",
             scalar_range=(0.0, 1.0),
             representation_options=["Points", "Surface", "Outline"],
         )
         self.current_representation = "Points"
-        self.pipeline.current_colormap = "Viridis (matplotlib)"
         self.apply_colormap("Viridis (matplotlib)")
         logger.info("CSV source created with default representation=Points")
         return self.pipeline.representation_options
 
-    def _fits_preview_factor(self, metadata: dict[str, Any]) -> int:
-        naxis = int(metadata.get("naxis") or 0)
-        if naxis < 3:
+    def _fits_downsample_factor(self, metadata: dict[str, Any]) -> int:
+        if int(metadata.get("naxis") or 0) < 3:
             return 1
-        # Default to a deterministic stride-4 preview for FITS 3D cubes. This
-        # keeps the first remote frame lightweight while preserving structure.
-        return max(1, int(os.getenv("FITS_PREVIEW_FACTOR", "4")))
+        # Keep preview-first optional and non-intrusive. By default, the
+        # authoritative FITS source is full resolution; downsampling is opt-in.
+        return max(1, int(os.getenv("FITS_PREVIEW_FACTOR", "1")))
 
     def _create_fits_programmable_source(self, dataset_path: str, downsample_factor: int) -> tuple[object, tuple[int, int, int]]:
         source = simple.ProgrammableSource()
@@ -129,35 +118,15 @@ class RemotePipelineController:
         metadata = dict(metadata)
         metadata.setdefault("path", dataset_path)
         naxis = int(metadata.get("naxis") or 0)
-        shape = metadata.get("shape") or []
         scalar_name = str(metadata.get("scalar_name") or "FITSImage")
-        full_dimensions = self._shape_to_xyz(shape)
-        preview_factor = self._fits_preview_factor(metadata)
+        downsample_factor = self._fits_downsample_factor(metadata)
 
-        if naxis >= 3 and preview_factor > 1:
-            preview_source, preview_dimensions = self._create_fits_programmable_source(dataset_path, preview_factor)
-            full_source = None
-            source = preview_source
-            vtk_dimensions = preview_dimensions
-            is_preview_mode = True
+        source, vtk_dimensions = self._create_fits_programmable_source(dataset_path, downsample_factor)
+        if downsample_factor > 1:
             logger.info(
-                "Preview source created: preview_factor=%s preview_dimensions=%s full_dimensions=%s representation=%s",
-                preview_factor,
-                preview_dimensions,
-                full_dimensions,
-                "Slice",
-            )
-        else:
-            source, vtk_dimensions = self._create_fits_programmable_source(dataset_path, 1)
-            preview_source = None
-            preview_dimensions = None
-            full_source = source
-            is_preview_mode = False
-            logger.info(
-                "Full-resolution source ready: full_dimensions=%s preview_dimensions=%s representation=%s",
-                full_dimensions,
-                preview_dimensions,
-                "Slice",
+                "Applied optional FITS downsampling before pipeline creation: factor=%s dimensions=%s",
+                downsample_factor,
+                vtk_dimensions,
             )
 
         slice_source = None
@@ -174,27 +143,17 @@ class RemotePipelineController:
             contour_source, iso_value, iso_min, iso_max = self._create_fits_contour(source, metadata, scalar_name)
             display = simple.Show(slice_source, self.view, "GeometryRepresentation")
             display.Representation = "Surface"
-            try:
-                simple.Hide(source, self.view)
-            except Exception:
-                pass
-            try:
-                simple.Hide(contour_source, self.view)
-            except Exception:
-                pass
+            self._hide_sources((source, contour_source))
+            shown_object = slice_source
         else:
             display = simple.Show(source, self.view)
             display.Representation = "Slice"
+            shown_object = source
 
-        shown_object = slice_source or source
         vtk_details = self._inspect_dataset(shown_object, scalar_name)
         scalar_range = vtk_details["active_range"]
         if slice_source is not None:
-            logger.info(
-                "Slice input source=%s dims=%s",
-                self._fits_source_label(source),
-                vtk_dimensions,
-            )
+            logger.info("Slice input source=source dims=%s", vtk_dimensions)
             logger.info(
                 "Slice VTK diagnostics: bounds=%s arrays=%s active=%s range=%s",
                 vtk_details["bounds"],
@@ -206,28 +165,21 @@ class RemotePipelineController:
         self.pipeline = RemotePipelineState(
             dataset_type="fits",
             source=source,
-            full_source=full_source,
-            preview_source=preview_source,
             fits_slice=slice_source,
+            fits_contour=contour_source,
             display=display,
-            active_source=slice_source or source,
             view=self.view,
             scalar_name=scalar_name,
             scalar_range=scalar_range,
             representation_options=representation_options,
             dataset_metadata=metadata,
             vtk_dimensions=vtk_dimensions,
-            fits_contour=contour_source,
             iso_value=iso_value,
             iso_min=iso_min,
             iso_max=iso_max,
-            preview_factor=preview_factor,
-            is_preview_mode=is_preview_mode,
-            full_dimensions=full_dimensions,
-            preview_dimensions=preview_dimensions,
+            downsample_factor=downsample_factor,
         )
         self.current_representation = default_representation
-        self.pipeline.current_colormap = "Viridis (matplotlib)"
         self.pipeline.volume_threshold, self.pipeline.opacity_scale = self._initial_volume_defaults(metadata)
         logger.info(
             "Initial volume defaults: threshold=%s opacity_scale=%s volume_preset=%s colormap=%s",
@@ -238,8 +190,7 @@ class RemotePipelineController:
         )
         self.apply_colormap("Viridis (matplotlib)")
         logger.info(
-            "FITS source created: mode=%s source=%s shown=%s vtk_dimensions=%s extent=%s bounds=%s scalar_range=%s default_representation=%s",
-            "preview" if is_preview_mode else "full",
+            "FITS source created: source=%s shown=%s vtk_dimensions=%s extent=%s bounds=%s scalar_range=%s default_representation=%s",
             type(source).__name__,
             type(shown_object).__name__,
             vtk_dimensions,
@@ -272,8 +223,6 @@ class RemotePipelineController:
             iso_min = data_min
             iso_max = data_max if data_max > data_min else data_min + 1.0
 
-        # Astronomical FITS cubes are often noise-dominated. Use a conservative
-        # default that favors real structures over background: max(p90, mean + 3*rms).
         iso_value = max(p90, mean + 3.0 * rms)
         iso_value = min(max(iso_value, iso_min), iso_max)
 
@@ -307,18 +256,12 @@ class RemotePipelineController:
         p99 = float(stats.get("p99", p95))
         dynamic_span = max(p99 - p75, 1e-6)
 
-        # Real FITS cubes such as WALLABY are often low-contrast and noise-dominated.
-        # Start slightly above the background and increase opacity when the robust
-        # percentile span is narrow so structures are readable without crushing the LUT.
         threshold = 0.15 if p75 >= mean + 0.5 * rms else 0.05
         opacity_scale = 1.4 if dynamic_span < 3.0 * max(rms, 1e-6) else 1.0
         return threshold, opacity_scale
 
     def _create_central_slice(self, source, dims_xyz: tuple[int, int, int]):
         center = [0.5 * max(dim - 1, 0) for dim in dims_xyz]
-        # Keep the default FITS view explicit and stable: a central slice along Z.
-        # This makes the initial plane perpendicular to the Z axis, regardless of
-        # dataset anisotropy, and keeps future axis switching straightforward.
         z_normal = [0.0, 0.0, 1.0]
 
         slice_filter = simple.Slice(Input=source)
@@ -327,8 +270,7 @@ class RemotePipelineController:
         slice_filter.SliceType.Origin = center
         slice_filter.SliceType.Normal = z_normal
         logger.info(
-            "Created central FITS slice along Z: input_source=%s origin=%s normal=%s dims_xyz=%s axis=%s",
-            self._fits_source_label(source),
+            "Created central FITS slice along Z: origin=%s normal=%s dims_xyz=%s axis=%s",
             center,
             z_normal,
             dims_xyz,
@@ -362,13 +304,6 @@ outInfo = self.GetOutputInformation(0)
 outInfo.Set(self.GetExecutive().WHOLE_EXTENT(), 0, dims[0]-1, 0, dims[1]-1, 0, dims[2]-1)
 """
 
-    def _shape_to_xyz(self, shape: list[int]) -> tuple[int, int, int]:
-        if len(shape) == 2:
-            return (int(shape[1]), int(shape[0]), 1)
-        if len(shape) >= 3:
-            return (int(shape[2]), int(shape[1]), int(shape[0]))
-        return (1, 1, 1)
-
     def _build_fits_script(self, dataset_path: str, downsample_factor: int = 1) -> str:
         project_root = os.getenv("PROJECT_ROOT", os.getcwd())
         payload = {
@@ -392,92 +327,6 @@ output = self.GetOutputDataObject(0)
 output.ShallowCopy(vtk_image)
 """
 
-    def _rebuild_fits_derived_sources(self, source) -> None:
-        assert self.pipeline is not None
-        metadata = self.pipeline.dataset_metadata or {}
-        dims_xyz = self.pipeline.preview_dimensions if self.pipeline.is_preview_mode else self.pipeline.full_dimensions
-
-        for derived in (self.pipeline.fits_contour, self.pipeline.fits_slice):
-            if derived is None:
-                continue
-            try:
-                simple.Hide(derived, self.view)
-            except Exception:
-                pass
-            try:
-                simple.Delete(derived)
-            except Exception:
-                pass
-
-        self.pipeline.fits_slice = None
-        self.pipeline.fits_contour = None
-
-        if int(metadata.get("naxis") or 0) < 3:
-            return
-
-        if dims_xyz is None:
-            dims_xyz = self._source_dimensions(source)
-        self.pipeline.fits_slice = self._create_central_slice(source, dims_xyz)
-        self.pipeline.fits_slice.UpdatePipeline()
-        contour_source, iso_value, iso_min, iso_max = self._create_fits_contour(source, metadata, self.pipeline.scalar_name)
-        self.pipeline.fits_contour = contour_source
-        self.pipeline.iso_min = iso_min
-        self.pipeline.iso_max = iso_max
-        self.pipeline.iso_value = max(iso_min, min(iso_max, self.pipeline.iso_value or iso_value))
-        self.pipeline.fits_contour.Isosurfaces = [self.pipeline.iso_value]
-        self.pipeline.fits_contour.UpdatePipeline()
-        slice_details = self._inspect_dataset(self.pipeline.fits_slice, self.pipeline.scalar_name)
-        logger.info(
-            "Slice VTK diagnostics: input_source=%s bounds=%s arrays=%s active=%s range=%s",
-            self._fits_source_label(source),
-            slice_details["bounds"],
-            slice_details["point_arrays"],
-            slice_details["active_array"],
-            slice_details["active_range"],
-        )
-
-    def load_full_resolution(self) -> bool:
-        if self.pipeline is None or self.pipeline.dataset_type != "fits" or not self.pipeline.is_preview_mode:
-            return False
-
-        metadata = self.pipeline.dataset_metadata or {}
-        dataset_path = str(metadata.get("path") or "")
-        if not dataset_path:
-            logger.warning("Full-resolution load requested without dataset path in metadata")
-            return False
-
-        if self.pipeline.full_source is None:
-            self.pipeline.full_source, full_dimensions = self._create_fits_programmable_source(dataset_path, 1)
-            self.pipeline.full_dimensions = full_dimensions
-            logger.info(
-                "Full-resolution source ready: full_dimensions=%s preview_dimensions=%s representation=%s",
-                self.pipeline.full_dimensions,
-                self.pipeline.preview_dimensions,
-                self.current_representation,
-            )
-
-        self.pipeline.source = self.pipeline.full_source
-        self.pipeline.is_preview_mode = False
-        self.pipeline.vtk_dimensions = self.pipeline.full_dimensions
-        self._rebuild_fits_derived_sources(self.pipeline.source)
-
-        if self.current_representation == "Slice" and self.pipeline.fits_slice is not None:
-            self._swap_display_source(self.pipeline.fits_slice, "Surface", reset_camera=False)
-        elif self.current_representation == "Isocontour" and self.pipeline.fits_contour is not None:
-            self._swap_display_source(self.pipeline.fits_contour, "Surface", reset_camera=False)
-        else:
-            source_representation = "Volume" if self.current_representation == "Volume" else "Outline"
-            self._swap_display_source(self.pipeline.source, source_representation, reset_camera=False)
-
-        self.apply_colormap(self.pipeline.current_colormap)
-        logger.info(
-            "Switched from preview to full source: representation=%s preview_dimensions=%s full_dimensions=%s",
-            self.current_representation,
-            self.pipeline.preview_dimensions,
-            self.pipeline.full_dimensions,
-        )
-        return True
-
     def apply_colormap(self, preset: str) -> None:
         if self.pipeline is None:
             return
@@ -487,22 +336,18 @@ output.ShallowCopy(vtk_image)
         lut = simple.GetColorTransferFunction(self.pipeline.scalar_name)
         pwf = simple.GetOpacityTransferFunction(self.pipeline.scalar_name)
         lut.ApplyPreset(preset, True)
-        active_details = self._inspect_dataset(self.pipeline.active_source, self.pipeline.scalar_name)
+        current_object = self._current_display_object()
+        active_details = self._inspect_dataset(current_object, self.pipeline.scalar_name)
         self.pipeline.scalar_range = active_details["active_range"]
         lut.RescaleTransferFunction(*self.pipeline.scalar_range)
         pwf.RescaleTransferFunction(*self.pipeline.scalar_range)
         logger.info(
-            "Applied scalar coloring: requested_colormap=%s applied_colormap=%s field=%s range=%s object=%s mode=%s",
+            "Applied scalar coloring: requested_colormap=%s applied_colormap=%s field=%s range=%s object=%s",
             preset,
             self.pipeline.current_colormap,
             self.pipeline.scalar_name,
             self.pipeline.scalar_range,
-            "contour"
-            if self.pipeline.active_source is self.pipeline.fits_contour
-            else "slice"
-            if self.pipeline.active_source is self.pipeline.fits_slice
-            else "source",
-            "preview" if self.pipeline.is_preview_mode else "full",
+            self._current_object_label(),
         )
         if self.pipeline.dataset_type == "fits" and self.current_representation == "Volume":
             self._apply_fits_volume_transfer_functions()
@@ -525,13 +370,24 @@ output.ShallowCopy(vtk_image)
         normalized = representation if representation in {"Slice", "Volume", "Isocontour", "Outline"} else "Slice"
         logger.info("Applying FITS representation=%s", normalized)
 
-        if normalized == "Slice" and self.pipeline.fits_slice is not None:
-            self._swap_display_source(self.pipeline.fits_slice, "Surface")
+        if normalized == "Slice":
+            if self.pipeline.fits_slice is None:
+                logger.warning("Slice requested but slice filter is not available")
+                return
+            self._show_fits_object(self.pipeline.fits_slice, "Surface")
         elif normalized == "Isocontour":
-            self._set_fits_isocontour()
+            if self.pipeline.fits_contour is None:
+                logger.warning("Isocontour requested but contour filter is not available")
+                return
+            self._show_fits_object(self.pipeline.fits_contour, "Surface")
+            logger.info(
+                "Applying representation=Isocontour iso_value=%s scalar_range=%s",
+                self.pipeline.iso_value,
+                self.pipeline.scalar_range,
+            )
         else:
             source_representation = "Volume" if normalized == "Volume" else "Outline"
-            self._swap_display_source(self.pipeline.source, source_representation)
+            self._show_fits_object(self.pipeline.source, source_representation)
 
         self.current_representation = normalized
         self.apply_colormap(self.pipeline.current_colormap)
@@ -554,27 +410,26 @@ output.ShallowCopy(vtk_image)
             return
 
         next_source = self.pipeline.csv_surface if normalized == "Surface" else self.pipeline.source
-        self._swap_display_source(next_source, normalized)
+        try:
+            simple.Hide(self.pipeline.source, self.view)
+        except Exception:
+            pass
+        if self.pipeline.csv_surface is not None:
+            try:
+                simple.Hide(self.pipeline.csv_surface, self.view)
+            except Exception:
+                pass
+        display = simple.Show(next_source, self.view)
+        display.Representation = normalized
         if normalized == "Points":
-            self.pipeline.display.PointSize = 5.0
-            self.pipeline.display.Opacity = 0.95
+            display.PointSize = 5.0
+            display.Opacity = 0.95
+        self.pipeline.display = display
         self.current_representation = normalized
         self.apply_colormap(self.pipeline.current_colormap)
         logger.info("CSV representation set: %s", normalized)
 
-    def _set_fits_isocontour(self) -> None:
-        assert self.pipeline is not None
-        if self.pipeline.fits_contour is None:
-            logger.warning("Isocontour requested but contour source is not available")
-            return
-        self._swap_display_source(self.pipeline.fits_contour, "Surface")
-        logger.info(
-            "Applying representation=Isocontour iso_value=%s scalar_range=%s",
-            self.pipeline.iso_value,
-            self.pipeline.scalar_range,
-        )
-
-    def _swap_display_source(self, next_source, representation: str, reset_camera: bool = True) -> None:
+    def _show_fits_object(self, next_source, representation: str, reset_camera: bool = True) -> None:
         assert self.pipeline is not None
         self._hide_all_fits_objects()
 
@@ -582,19 +437,12 @@ output.ShallowCopy(vtk_image)
         display.Representation = representation
         if representation != "Volume":
             display.Opacity = 1.0
-        self.pipeline.active_source = next_source
         self.pipeline.display = display
         details = self._inspect_dataset(next_source, self.pipeline.scalar_name)
         logger.info(
-            "Showing object=%s representation=%s mode=%s active_source=%s bounds=%s arrays(point=%s, cell=%s) active=%s range=%s",
-            "contour"
-            if next_source is self.pipeline.fits_contour
-            else "slice"
-            if next_source is self.pipeline.fits_slice
-            else "source",
+            "Showing object=%s representation=%s bounds=%s arrays(point=%s, cell=%s) active=%s range=%s",
+            "slice" if next_source is self.pipeline.fits_slice else "contour" if next_source is self.pipeline.fits_contour else "source",
             representation,
-            "preview" if self.pipeline.is_preview_mode else "full",
-            self._fits_source_label(next_source),
             details["bounds"],
             details["point_arrays"],
             details["cell_arrays"],
@@ -648,7 +496,7 @@ output.ShallowCopy(vtk_image)
             self.pipeline.iso_max,
         )
         if self.current_representation == "Isocontour":
-            self._swap_display_source(self.pipeline.fits_contour, "Surface")
+            self._show_fits_object(self.pipeline.fits_contour, "Surface", reset_camera=False)
             self.apply_colormap(self.pipeline.current_colormap)
             simple.Render(self.view)
 
@@ -668,14 +516,7 @@ output.ShallowCopy(vtk_image)
         if self.pipeline is None:
             return
 
-        for source in (
-            self.pipeline.fits_contour,
-            self.pipeline.fits_slice,
-            self.pipeline.csv_surface,
-            self.pipeline.preview_source,
-            self.pipeline.full_source,
-            self.pipeline.source,
-        ):
+        for source in (self.pipeline.fits_contour, self.pipeline.fits_slice, self.pipeline.csv_surface, self.pipeline.source):
             if source is None:
                 continue
             try:
@@ -749,41 +590,14 @@ output.ShallowCopy(vtk_image)
             "active_range": active_range if active is not None else (0.0, 1.0),
         }
 
-    def _source_dimensions(self, source) -> tuple[int, int, int]:
-        source.UpdatePipeline()
-        data_info = source.GetDataInformation()
-        extent = data_info.GetExtent()
-        return (
-            int(extent[1] - extent[0] + 1),
-            int(extent[3] - extent[2] + 1),
-            int(extent[5] - extent[4] + 1),
-        )
-
-    def _fits_source_label(self, source) -> str:
-        if self.pipeline is None:
-            return type(source).__name__
-        if source is self.pipeline.preview_source:
-            return "preview_source"
-        if source is self.pipeline.full_source:
-            return "full_source"
-        if source is self.pipeline.fits_slice:
-            return "slice"
-        if source is self.pipeline.fits_contour:
-            return "contour"
-        if source is self.pipeline.source:
-            return "source"
-        return type(source).__name__
-
     def _hide_all_fits_objects(self) -> None:
         assert self.pipeline is not None
         if self.pipeline.dataset_type != "fits":
-            try:
-                simple.Hide(self.pipeline.active_source, self.view)
-            except Exception:
-                pass
             return
+        self._hide_sources((self.pipeline.fits_slice, self.pipeline.fits_contour, self.pipeline.source))
 
-        for obj in (self.pipeline.fits_slice, self.pipeline.fits_contour, self.pipeline.preview_source, self.pipeline.full_source, self.pipeline.source):
+    def _hide_sources(self, sources: tuple[object | None, ...]) -> None:
+        for obj in sources:
             if obj is None:
                 continue
             try:
@@ -849,9 +663,6 @@ output.ShallowCopy(vtk_image)
         p95 = float(stats.get("p95", data_max))
         p99 = float(stats.get("p99", data_max))
 
-        # Astronomical FITS cubes are often noise-dominated. Use a lower bound driven
-        # by background statistics and a high bound clamped by upper percentiles so
-        # the LUT keeps contrast on real structures instead of stretching to outliers.
         robust_low = max(data_min, p75, mean + self.pipeline.volume_threshold * 2.0 * rms)
         robust_high = min(data_max, p99, max(p95, mean + 6.0 * rms))
 
@@ -887,3 +698,29 @@ output.ShallowCopy(vtk_image)
             (low + 0.55 * span, strength[1]),
             (high, strength[2]),
         ]
+
+    def _current_display_object(self):
+        assert self.pipeline is not None
+        if self.pipeline.dataset_type != "fits":
+            if self.current_representation == "Surface" and self.pipeline.csv_surface is not None:
+                return self.pipeline.csv_surface
+            return self.pipeline.source
+        if self.current_representation == "Slice" and self.pipeline.fits_slice is not None:
+            return self.pipeline.fits_slice
+        if self.current_representation == "Isocontour" and self.pipeline.fits_contour is not None:
+            return self.pipeline.fits_contour
+        return self.pipeline.source
+
+    def _current_object_label(self) -> str:
+        if self.pipeline is None:
+            return "unknown"
+        current = self._current_display_object()
+        if current is self.pipeline.fits_slice:
+            return "slice"
+        if current is self.pipeline.fits_contour:
+            return "contour"
+        if current is self.pipeline.source:
+            return "source"
+        if current is self.pipeline.csv_surface:
+            return "surface"
+        return "unknown"

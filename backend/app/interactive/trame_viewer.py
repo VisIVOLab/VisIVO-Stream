@@ -121,8 +121,6 @@ class PvServerTrameViewer:
         self.state.iso_value = 0.0
         self.state.iso_min = 0.0
         self.state.iso_max = 1.0
-        self.state.resolution_mode = "preview"
-        self.state.can_load_full_resolution = False
         self.state.status_message = "Connecting to pvserver"
 
     def _connect_to_pvserver(self) -> None:
@@ -164,13 +162,6 @@ class PvServerTrameViewer:
 
             with layout.toolbar:
                 vuetify.VSpacer()
-                vuetify.VBtn(
-                    "Load Full Resolution",
-                    click=self.load_full_resolution,
-                    classes="mr-2",
-                    outlined=True,
-                    v_if="can_load_full_resolution",
-                )
                 vuetify.VBtn("Reload Dataset", click=self.reload_dataset, classes="mr-2")
                 vuetify.VBtn("Reset Camera", click=self.reset_camera, outlined=True)
 
@@ -181,7 +172,6 @@ class PvServerTrameViewer:
                     vuetify.VAlert("{{ 'Session ' + session_id }}", type="info", dense=True, outlined=True, classes="mb-2")
                     vuetify.VAlert("{{ 'pvserver ' + pvserver_endpoint }}", type="info", dense=True, outlined=True, classes="mb-2")
                     vuetify.VAlert("{{ dataset_name + ' (' + dataset_type + ')' }}", type="success", dense=True, outlined=True, classes="mb-4")
-                    vuetify.VAlert("{{ 'Resolution mode: ' + resolution_mode }}", type="info", dense=True, outlined=True, classes="mb-4")
                     vuetify.VSelect(
                         label="Representation",
                         items=("representation_options", []),
@@ -286,8 +276,6 @@ class PvServerTrameViewer:
                 self.state.iso_value = self.pipeline.pipeline.iso_value
                 self.state.iso_min = self.pipeline.pipeline.iso_min
                 self.state.iso_max = self.pipeline.pipeline.iso_max
-                self.state.resolution_mode = "preview" if self.pipeline.pipeline.is_preview_mode else "full-resolution"
-                self.state.can_load_full_resolution = self.pipeline.pipeline.is_preview_mode
                 self.pipeline.set_volume_threshold(self.pipeline.pipeline.volume_threshold)
                 self.pipeline.set_opacity_scale(self.pipeline.pipeline.opacity_scale)
             self.state.status_message = f"Loaded {self.state.dataset_name} as {self.state.dataset_type}"
@@ -321,21 +309,6 @@ class PvServerTrameViewer:
         logger.info("Resetting contrast from viewer controls")
         self.pipeline.reset_contrast()
         self.state.status_message = "Contrast reset"
-        self._safe_view_update()
-
-    def load_full_resolution(self, *args, **kwargs) -> None:
-        del args, kwargs
-        if self.pipeline is None:
-            return
-        logger.info("Load full resolution requested from viewer controls")
-        switched = self.pipeline.load_full_resolution()
-        if not switched:
-            self.state.status_message = "Full resolution already active"
-            self._safe_view_update()
-            return
-        self.state.resolution_mode = "full-resolution"
-        self.state.can_load_full_resolution = False
-        self.state.status_message = "Full resolution loaded"
         self._safe_view_update()
 
     def _handle_representation_change(self, representation, **_kwargs) -> None:
