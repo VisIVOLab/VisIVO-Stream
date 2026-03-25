@@ -9,7 +9,7 @@ from fastapi import HTTPException
 
 from app.core.config import get_settings
 from app.models.render import RenderParameters, RenderSession
-from app.services.datasets import DatasetCatalog
+from app.services.datasets import get_dataset_catalog
 
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class ParaViewRenderService:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.catalog = DatasetCatalog(self.settings.datasets_dir)
+        self.catalog = get_dataset_catalog()
         self.sessions: dict[str, RenderSession] = {}
         self.settings.renders_dir.mkdir(parents=True, exist_ok=True)
 

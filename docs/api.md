@@ -14,7 +14,33 @@ Restituisce lo stato dell’API.
 
 Elenca i dataset disponibili.
 
-Ogni dataset espone anche `dataset_type`, ad esempio `csv` o `fits`.
+Ogni dataset espone anche:
+
+- `dataset_type`
+- `origin`
+- `uploaded`
+
+### `POST /datasets/upload`
+
+Carica un nuovo dataset FITS a runtime tramite multipart upload.
+
+Vincoli:
+
+- supporta `.fits` e `.fit`
+- salva il file nella directory runtime configurata
+- restituisce dataset registrato e metadata
+
+### `POST /datasets/load`
+
+Restituisce record e metadata di un dataset già registrato, utile per il viewer runtime.
+
+Payload:
+
+```json
+{
+  "dataset_id": "wallaby_upload_1"
+}
+```
 
 ### `GET /datasets/{dataset_id}/metadata`
 
@@ -99,10 +125,11 @@ Payload esempio locale:
 
 ```json
 {
-  "dataset_id": "galaxy_points",
   "launch_mode": "local"
 }
 ```
+
+`dataset_id` è opzionale: il viewer può partire senza dataset e caricarne uno successivamente via UI o API.
 
 Payload esempio MPI:
 

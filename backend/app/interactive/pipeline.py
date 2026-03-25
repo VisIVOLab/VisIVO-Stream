@@ -33,6 +33,10 @@ class RemotePipelineState:
     iso_min: float = 0.0
     iso_max: float = 1.0
     downsample_factor: int = 1
+    slice_axis: str = "Z"
+    slice_index: int = 0
+    slice_index_min: int = 0
+    slice_index_max: int = 0
 
 
 class RemotePipelineController:
@@ -136,9 +140,13 @@ class RemotePipelineController:
         iso_value = 0.0
         iso_min = 0.0
         iso_max = 1.0
+        slice_axis = "Z"
+        slice_index = max(0, int(vtk_dimensions[2] // 2)) if naxis >= 3 else 0
+        slice_index_min = 0
+        slice_index_max = max(0, int(vtk_dimensions[2] - 1)) if naxis >= 3 else 0
 
         if naxis >= 3:
-            slice_source = self._create_central_slice(source, vtk_dimensions)
+            slice_source = self._create_slice(source, vtk_dimensions, slice_axis, slice_index)
             slice_source.UpdatePipeline()
             contour_source, iso_value, iso_min, iso_max = self._create_fits_contour(source, metadata, scalar_name)
             display = simple.Show(slice_source, self.view, "GeometryRepresentation")
@@ -178,6 +186,10 @@ class RemotePipelineController:
             iso_min=iso_min,
             iso_max=iso_max,
             downsample_factor=downsample_factor,
+            slice_axis=slice_axis,
+            slice_index=slice_index,
+            slice_index_min=slice_index_min,
+            slice_index_max=slice_index_max,
         )
         self.current_representation = default_representation
         self.pipeline.volume_threshold, self.pipeline.opacity_scale = self._initial_volume_defaults(metadata)
@@ -260,23 +272,61 @@ class RemotePipelineController:
         opacity_scale = 1.4 if dynamic_span < 3.0 * max(rms, 1e-6) else 1.0
         return threshold, opacity_scale
 
-    def _create_central_slice(self, source, dims_xyz: tuple[int, int, int]):
-        center = [0.5 * max(dim - 1, 0) for dim in dims_xyz]
-        z_normal = [0.0, 0.0, 1.0]
+    def _slice_axis_to_index(self, axis: str) -> int:
+        return {"X": 0, "Y": 1, "Z": 2}.get(axis.upper(), 2)
 
+    def _slice_normal(self, axis: str) -> list[float]:
+        return {
+            "X": [1.0, 0.0, 0.0],
+            "Y": [0.0, 1.0, 0.0],
+            "Z": [0.0, 0.0, 1.0],
+        }.get(axis.upper(), [0.0, 0.0, 1.0])
+
+    def _slice_limits(self, dims_xyz: tuple[int, int, int], axis: str) -> tuple[int, int]:
+        axis_index = self._slice_axis_to_index(axis)
+        return 0, max(0, int(dims_xyz[axis_index] - 1))
+
+    def _slice_origin(self, dims_xyz: tuple[int, int, int], axis: str, slice_index: int) -> list[float]:
+        center = [0.5 * max(dim - 1, 0) for dim in dims_xyz]
+        axis_index = self._slice_axis_to_index(axis)
+        low, high = self._slice_limits(dims_xyz, axis)
+        center[axis_index] = float(max(low, min(high, int(slice_index))))
+        return center
+
+    def _create_slice(self, source, dims_xyz: tuple[int, int, int], axis: str, slice_index: int):
         slice_filter = simple.Slice(Input=source)
         slice_filter.SliceType = "Plane"
         slice_filter.SliceOffsetValues = [0.0]
-        slice_filter.SliceType.Origin = center
-        slice_filter.SliceType.Normal = z_normal
+        slice_filter.SliceType.Origin = self._slice_origin(dims_xyz, axis, slice_index)
+        slice_filter.SliceType.Normal = self._slice_normal(axis)
         logger.info(
-            "Created central FITS slice along Z: origin=%s normal=%s dims_xyz=%s axis=%s",
-            center,
-            z_normal,
+            "Created FITS slice: origin=%s normal=%s dims_xyz=%s axis=%s index=%s",
+            slice_filter.SliceType.Origin,
+            slice_filter.SliceType.Normal,
             dims_xyz,
-            "Z",
+            axis,
+            slice_index,
         )
         return slice_filter
+
+    def _update_slice_filter(self) -> None:
+        assert self.pipeline is not None
+        if self.pipeline.fits_slice is None or self.pipeline.vtk_dimensions is None:
+            return
+        origin = self._slice_origin(self.pipeline.vtk_dimensions, self.pipeline.slice_axis, self.pipeline.slice_index)
+        normal = self._slice_normal(self.pipeline.slice_axis)
+        self.pipeline.fits_slice.SliceType.Origin = origin
+        self.pipeline.fits_slice.SliceType.Normal = normal
+        self.pipeline.fits_slice.UpdatePipeline()
+        details = self._inspect_dataset(self.pipeline.fits_slice, self.pipeline.scalar_name)
+        logger.info(
+            "Updated FITS slice: axis=%s index=%s origin=%s normal=%s bounds=%s",
+            self.pipeline.slice_axis,
+            self.pipeline.slice_index,
+            origin,
+            normal,
+            details["bounds"],
+        )
 
     def _build_fits_request_information_script(self, dataset_path: str, downsample_factor: int = 1) -> str:
         project_root = os.getenv("PROJECT_ROOT", os.getcwd())
@@ -497,6 +547,39 @@ output.ShallowCopy(vtk_image)
         )
         if self.current_representation == "Isocontour":
             self._show_fits_object(self.pipeline.fits_contour, "Surface", reset_camera=False)
+            self.apply_colormap(self.pipeline.current_colormap)
+            simple.Render(self.view)
+
+    def set_slice_axis(self, axis: str) -> None:
+        if self.pipeline is None or self.pipeline.dataset_type != "fits" or self.pipeline.fits_slice is None or self.pipeline.vtk_dimensions is None:
+            return
+        normalized = axis.upper()
+        if normalized not in {"X", "Y", "Z"}:
+            normalized = "Z"
+        self.pipeline.slice_axis = normalized
+        self.pipeline.slice_index_min, self.pipeline.slice_index_max = self._slice_limits(self.pipeline.vtk_dimensions, normalized)
+        self.pipeline.slice_index = max(
+            self.pipeline.slice_index_min,
+            min(self.pipeline.slice_index_max, self.pipeline.slice_index),
+        )
+        logger.info("Slice axis selected: axis=%s index=%s", self.pipeline.slice_axis, self.pipeline.slice_index)
+        self._update_slice_filter()
+        if self.current_representation == "Slice":
+            self._show_fits_object(self.pipeline.fits_slice, "Surface", reset_camera=False)
+            self.apply_colormap(self.pipeline.current_colormap)
+            simple.Render(self.view)
+
+    def set_slice_index(self, slice_index: int) -> None:
+        if self.pipeline is None or self.pipeline.dataset_type != "fits" or self.pipeline.fits_slice is None:
+            return
+        self.pipeline.slice_index = max(
+            self.pipeline.slice_index_min,
+            min(self.pipeline.slice_index_max, int(slice_index)),
+        )
+        logger.info("Slice index selected: axis=%s index=%s", self.pipeline.slice_axis, self.pipeline.slice_index)
+        self._update_slice_filter()
+        if self.current_representation == "Slice":
+            self._show_fits_object(self.pipeline.fits_slice, "Surface", reset_camera=False)
             self.apply_colormap(self.pipeline.current_colormap)
             simple.Render(self.view)
 

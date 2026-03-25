@@ -50,6 +50,7 @@ Fallback backend:
 Responsibilities:
 
 - dataset discovery
+- runtime upload and registration of FITS datasets
 - FITS IO through `astropy.io.fits`
 - metadata extraction and validation
 - conversion from NumPy arrays to `vtkImageData`
@@ -73,6 +74,7 @@ Responsibilities:
 
 - connect the browser viewer to `pvserver`
 - expose view controls and representation changes
+- allow runtime dataset selection and upload through the API
 - drive remote ParaView state through a trame application
 
 Key files:
@@ -90,6 +92,15 @@ Current defaults are intentionally conservative and visibility-oriented:
 - FITS 4D: first frame only for now
 
 Volume rendering uses robust statistics and percentiles so astronomical cubes remain visible without relying only on absolute min/max values.
+
+The active interactive workflow keeps a single authoritative ParaView source for FITS data:
+
+- `Slice` -> `fits_slice`
+- `Volume` -> `source`
+- `Isocontour` -> `fits_contour`
+- `Outline` -> `source`
+
+Runtime dataset loading rebuilds that same pipeline cleanly rather than creating parallel viewer states.
 
 ## Deployment Modes
 

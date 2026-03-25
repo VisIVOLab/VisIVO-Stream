@@ -11,6 +11,7 @@ from app.core.pythonpath import warn_if_numpy_paraview_incompatible
 settings = get_settings()
 configure_logging(settings.log_level)
 warn_if_numpy_paraview_incompatible()
+settings.runtime_upload_dir.mkdir(parents=True, exist_ok=True)
 settings.renders_dir.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(

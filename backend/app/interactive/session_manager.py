@@ -12,7 +12,7 @@ from app.models.interactive import (
     InteractiveSessionRecord,
     InteractiveSessionStopResponse,
 )
-from app.services.datasets import DatasetCatalog
+from app.services.datasets import get_dataset_catalog
 
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class InteractiveSessionManager:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.catalog = DatasetCatalog(self.settings.datasets_dir)
+        self.catalog = get_dataset_catalog()
         self.launcher = PvServerLauncher()
         self.sessions: dict[str, InteractiveSessionRecord] = {}
         self.processes: dict[str, subprocess.Popen[str]] = {}
@@ -37,23 +37,27 @@ class InteractiveSessionManager:
         return session
 
     def create_session(self, payload: InteractiveSessionCreateRequest) -> InteractiveSessionRecord:
-        try:
-            dataset = self.catalog.get(payload.dataset_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=f"Dataset '{payload.dataset_id}' not found.") from exc
+        dataset = None
+        dataset_metadata = None
+        if payload.dataset_id:
+            try:
+                dataset = self.catalog.get(payload.dataset_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=f"Dataset '{payload.dataset_id}' not found.") from exc
 
-        if not dataset.path.exists():
-            raise HTTPException(status_code=500, detail=f"Dataset file missing: {dataset.path}")
+            if not dataset.path.exists():
+                raise HTTPException(status_code=500, detail=f"Dataset file missing: {dataset.path}")
+            dataset_metadata = self.catalog.metadata(dataset.id).model_dump(mode="json")
 
         session_id = str(uuid.uuid4())
         port = payload.port or self.launcher.reserve_port()
         record = InteractiveSessionRecord(
             session_id=session_id,
-            dataset_id=dataset.id,
-            dataset_name=dataset.name,
-            dataset_path=str(dataset.path),
-            dataset_type=dataset.dataset_type,
-            dataset_metadata=self.catalog.metadata(dataset.id).model_dump(mode="json"),
+            dataset_id=dataset.id if dataset else None,
+            dataset_name=dataset.name if dataset else None,
+            dataset_path=str(dataset.path) if dataset else None,
+            dataset_type=dataset.dataset_type if dataset else None,
+            dataset_metadata=dataset_metadata,
             launch_mode=payload.launch_mode,
             status="created",
             host=payload.host,

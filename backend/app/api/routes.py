@@ -1,14 +1,17 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, File, UploadFile
 
+from app.models.dataset import DatasetLoadRequest
 from app.models.interactive import InteractiveSessionCreateRequest
 from app.models.render import CreateSessionRequest, RenderRequest
 from app.interactive.session_manager import InteractiveSessionManager
 from app.services.paraview_service import ParaViewRenderService
+from app.services.datasets import get_dataset_catalog
 
 
 router = APIRouter()
 service = ParaViewRenderService()
 interactive_sessions = InteractiveSessionManager()
+dataset_catalog = get_dataset_catalog()
 
 
 @router.get("/health")
@@ -25,6 +28,8 @@ def list_datasets():
             "description": dataset.description,
             "file_name": dataset.file_name,
             "dataset_type": dataset.dataset_type,
+            "origin": dataset.origin,
+            "uploaded": dataset.uploaded,
             "scalar_fields": dataset.scalar_fields,
             "point_count_hint": dataset.point_count_hint,
         }
@@ -40,6 +45,16 @@ def get_dataset_metadata(dataset_id: str):
 @router.get("/datasets/{dataset_id}/fits-header")
 def get_dataset_fits_header(dataset_id: str):
     return service.get_fits_header(dataset_id)
+
+
+@router.post("/datasets/upload")
+def upload_dataset(file: UploadFile = File(...)):
+    return dataset_catalog.upload_fits(file)
+
+
+@router.post("/datasets/load")
+def load_dataset(payload: DatasetLoadRequest):
+    return dataset_catalog.load(payload.dataset_id)
 
 
 @router.post("/sessions")

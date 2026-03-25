@@ -9,7 +9,7 @@ InteractiveSessionStatus = Literal["created", "running", "attached", "stopped", 
 
 
 class InteractiveSessionCreateRequest(BaseModel):
-    dataset_id: str
+    dataset_id: str | None = None
     launch_mode: InteractiveLaunchMode = "local"
     host: str = "127.0.0.1"
     port: int | None = None
@@ -20,10 +20,10 @@ class InteractiveSessionCreateRequest(BaseModel):
 
 class InteractiveSessionRecord(BaseModel):
     session_id: str
-    dataset_id: str
-    dataset_name: str
-    dataset_path: str
-    dataset_type: str
+    dataset_id: str | None = None
+    dataset_name: str | None = None
+    dataset_path: str | None = None
+    dataset_type: str | None = None
     dataset_metadata: dict[str, Any] | None = None
     launch_mode: InteractiveLaunchMode
     status: InteractiveSessionStatus

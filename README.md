@@ -170,6 +170,12 @@ If your ParaView Python runtime does not ship with `pip`, keep `trame` and `astr
 
 When using ParaView 6.0.1, make sure the exposed environment also resolves to `numpy<2`. A mixed setup with `pvpython` plus external `site-packages` from a NumPy 2.x environment will break FITS programmable sources.
 
+Relevant local config in `backend/.env`:
+
+- `RUNTIME_UPLOAD_DIR=./runtime/uploads`
+- `MAX_UPLOAD_SIZE_MB=256`
+- `FITS_PREVIEW_FACTOR=1`
+
 ### 2. Interactive Viewer
 
 With FastAPI already running:
@@ -177,12 +183,18 @@ With FastAPI already running:
 ```bash
 cd backend
 source .venv/bin/activate
-./scripts/run_interactive_viewer.sh --create-session --dataset-id galaxy_points
+./scripts/run_interactive_viewer.sh --create-session
 ```
 
 The viewer will be available at:
 
 - `http://127.0.0.1:8081`
+
+You can now start the viewer without a dataset and:
+
+- select a built-in dataset from the viewer dropdown
+- upload a FITS file at runtime from the viewer
+- load it without restarting the trame process
 
 ### 3. Fallback Preview Rendering
 
@@ -213,12 +225,23 @@ The FITS pipeline extracts:
 
 For FITS 3D, the interactive pipeline uses a single authoritative ParaView source. Optional input downsampling can still be enabled before source creation via `FITS_PREVIEW_FACTOR`; the default is `1`, which keeps the source at full resolution.
 
+Interactive exploration controls:
+
+- runtime dataset selection from the API catalog
+- runtime FITS upload into `RUNTIME_UPLOAD_DIR`
+- Slice controls: axis `X/Y/Z` and slice index
+- Volume controls: preset, threshold, opacity scale
+- Isocontour controls: iso value slider
+- metadata panel with dimensions, scalar range, mean, rms, origin, and current representation
+
 ## Main API Endpoints
 
 Base path: `/api/v1`
 
 - `GET /health`
 - `GET /datasets`
+- `POST /datasets/upload`
+- `POST /datasets/load`
 - `GET /datasets/{dataset_id}/metadata`
 - `GET /datasets/{dataset_id}/fits-header`
 - `POST /sessions`

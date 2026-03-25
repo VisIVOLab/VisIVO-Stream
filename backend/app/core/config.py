@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     api_prefix: str = "/api/v1"
     datasets_dir: Path = Field(default=Path("/app/data/samples"))
+    runtime_upload_dir: Path = Field(default=Path("./runtime/uploads"))
+    max_upload_size_mb: int = 256
     renders_dir: Path = Field(default=Path("/app/renders"))
     interactive_logs_dir: Path = Field(default=Path("./runtime/interactive"))
     paraview_script: Path = Field(default=Path("/app/scripts/render_dataset.py"))
